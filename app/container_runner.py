@@ -13,7 +13,7 @@ from typing import Any
 
 from claude_agent_sdk import AgentDefinition, ClaudeSDKClient, HookMatcher
 
-from app.agent_sdk_client import AgentResult, ClaudeAgentClient, _build_options, _collect_client_json_response
+from app.agent_sdk_client import AgentResult, ClaudeAgentClient, _build_options, _collect_client_agent_result
 from app.repo_profiler import build_repo_profile
 
 
@@ -25,6 +25,7 @@ AUTONOMOUS_IMPLEMENT_SYSTEM = """あなたはソフトウェア実装エージ�
 - 必要に応じて Bash でセットアップ・テスト・静的解析を実行する
 - まず現状を把握し、最小の変更で目的を達成する
 - 失敗したテストやコマンド結果を見て修正を反復する
+- plan.json と test_plan.json があれば、それを最優先の実装契約として扱う
 - TodoWrite を使って作業状況を管理してよい
 - 最後に、実施内容と検証結果だけを JSON で返す
 - JSON 以外は返さない
@@ -55,6 +56,19 @@ DEFAULT_ALLOWED_TOOLS = [
 NOTIFIABLE_TOOLS = {"Bash", "Write", "Edit", "Task"}
 NOTIFIABLE_SUBAGENTS = {"requirements-analyst", "test-designer", "implementer", "test-runner"}
 ACTIVITY_HISTORY_LIMIT = 200
+DANGEROUS_BASH_PATTERNS = (
+    "rm -rf /",
+    "sudo ",
+    "shutdown",
+    "reboot",
+    "halt",
+    "poweroff",
+    "terraform apply",
+    "kubectl delete",
+    "git push --force",
+    "drop database",
+    "drop schema",
+)
 
 
 @dataclass
@@ -130,6 +144,8 @@ def main() -> int:
     artifacts = Path(args.artifacts_dir or os.environ.get("ARTIFACTS_DIR", "/artifacts"))
     summary = json.loads((artifacts / "requirement_summary.json").read_text(encoding="utf-8"))
     issue = json.loads((artifacts / "issue.json").read_text(encoding="utf-8"))
+    plan = _load_optional_json(artifacts / "plan.json")
+    test_plan = _load_optional_json(artifacts / "test_plan.json")
     profile = build_repo_profile(workspace)
     _write_json(artifacts / "repo_profile.json", profile)
 
@@ -151,6 +167,8 @@ def main() -> int:
                 artifacts_dir=artifacts,
                 summary=summary,
                 issue=issue,
+                plan=plan if isinstance(plan, dict) else {},
+                test_plan=test_plan if isinstance(test_plan, dict) else {},
                 profile=profile,
                 activity_store=activity_store,
                 max_iterations=max_iterations,
@@ -168,6 +186,7 @@ def main() -> int:
         "test_result": last_verification,
     }
     _write_json(artifacts / "final_result.json", final_payload)
+    _write_json(artifacts / "verification_history.json", {"items": verification_history})
     return 0
 
 
@@ -181,6 +200,8 @@ def _parse_args() -> argparse.Namespace:
 def _build_iteration_prompt(
     summary: dict,
     issue: dict,
+    plan: dict[str, Any],
+    test_plan: dict[str, Any],
     profile: dict,
     iteration: int,
     previous_verification: dict[str, Any],
@@ -192,6 +213,10 @@ def _build_iteration_prompt(
         f"{json.dumps(issue, ensure_ascii=False, indent=2)}\n\n"
         "要件サマリー:\n"
         f"{json.dumps(summary, ensure_ascii=False, indent=2)}\n\n"
+        "実装計画 plan.json:\n"
+        f"{json.dumps(plan, ensure_ascii=False, indent=2)}\n\n"
+        "テスト計画 test_plan.json:\n"
+        f"{json.dumps(test_plan, ensure_ascii=False, indent=2)}\n\n"
         "リポジトリプロフィール:\n"
         f"{json.dumps(profile, ensure_ascii=False, indent=2)}\n\n"
         "これまでの検証履歴:\n"
@@ -212,6 +237,8 @@ async def _run_autonomous_iterations(
     artifacts_dir: Path,
     summary: dict,
     issue: dict,
+    plan: dict[str, Any],
+    test_plan: dict[str, Any],
     profile: dict,
     activity_store: ActivityStore,
     max_iterations: int,
@@ -227,7 +254,7 @@ async def _run_autonomous_iterations(
         cwd=workspace,
         max_turns=max_iterations * 4,
         allowed_tools=DEFAULT_ALLOWED_TOOLS,
-        permission_mode="bypassPermissions",
+        permission_mode="default",
         setting_sources=["project"],
         hooks=_build_hooks(activity_store),
         agents=_build_subagents(),
@@ -252,13 +279,24 @@ async def _run_autonomous_iterations(
                 prompt = _build_iteration_prompt(
                     summary=summary,
                     issue=issue,
+                    plan=plan,
+                    test_plan=test_plan,
                     profile=profile,
                     iteration=iteration,
                     previous_verification=last_verification,
                     verification_history=verification_history,
                 )
                 await sdk_client.query(prompt)
-                last_agent_result = await _collect_client_json_response(sdk_client)
+                raw_result = await _collect_client_agent_result(sdk_client)
+                last_agent_result = raw_result.structured_output if isinstance(raw_result.structured_output, dict) else {}
+                if not last_agent_result:
+                    try:
+                        last_agent_result = json.loads(raw_result.result)
+                    except json.JSONDecodeError as exc:
+                        raise RuntimeError(f"Claude Agent SDK did not return valid JSON. Raw response: {raw_result.result[:500]!r}") from exc
+                last_agent_result["session_id"] = raw_result.session_id
+                last_agent_result["total_cost_usd"] = raw_result.total_cost_usd
+                last_agent_result["usage"] = raw_result.usage
                 activity_store.record(
                     phase="agent",
                     tool_name="Agent",
@@ -293,14 +331,35 @@ async def _run_autonomous_iterations(
 def _build_hooks(activity_store: ActivityStore) -> dict[str, list[HookMatcher]]:
     async def pre_tool_use(input_data: dict[str, Any], tool_use_id: str | None, context: Any) -> dict[str, Any]:
         tool_name = str(input_data.get("tool_name", "unknown"))
-        summary = _summarize_tool(tool_name, input_data.get("tool_input", {}))
+        tool_input = input_data.get("tool_input", {})
+        if tool_name == "Bash":
+            command = str(tool_input.get("command") or "").strip().lower()
+            for pattern in DANGEROUS_BASH_PATTERNS:
+                if pattern in command:
+                    activity_store.record(
+                        phase="tool",
+                        tool_name=tool_name,
+                        summary=f"危険な Bash コマンドを拒否しました: {pattern}",
+                        status="failed",
+                        tool_use_id=tool_use_id,
+                        details={"tool_input": _truncate_details(tool_input)},
+                        notify=True,
+                    )
+                    return {
+                        "hookSpecificOutput": {
+                            "hookEventName": "PreToolUse",
+                            "permissionDecision": "deny",
+                            "permissionDecisionReason": f"Dangerous bash command blocked: {pattern}",
+                        }
+                    }
+        summary = _summarize_tool(tool_name, tool_input)
         activity_store.record(
             phase="tool",
             tool_name=tool_name,
             summary=summary,
             status="started",
             tool_use_id=tool_use_id,
-            details={"tool_input": _truncate_details(input_data.get("tool_input", {}))},
+            details={"tool_input": _truncate_details(tool_input)},
             notify=tool_name in NOTIFIABLE_TOOLS,
         )
         return {}
@@ -425,25 +484,139 @@ def _build_subagents() -> dict[str, AgentDefinition]:
 
 
 def _run_commands(workspace: str, profile: dict) -> dict:
-    setup_output: list[dict] = []
+    steps: list[dict[str, Any]] = []
+    migration = profile.get("migration") if isinstance(profile.get("migration"), dict) else {}
+    apply_cmds = list(migration.get("apply_cmds", [])) if migration else []
+    rollback_cmds = list(migration.get("rollback_cmds", [])) if migration else []
+
     for cmd in profile.get("setup_commands", []):
-        setup_output.append(_run_shell(cmd, workspace))
-        if setup_output[-1]["exit_code"] != 0:
+        result = _run_shell(cmd, workspace)
+        result["phase"] = "setup"
+        steps.append(result)
+        if result["exit_code"] != 0:
             return {
                 "success": False,
                 "phase": "setup",
-                "steps": setup_output,
-                "output": setup_output[-1]["output"],
+                "command": cmd,
+                "steps": steps,
+                "output": result["output"],
             }
 
-    for cmd in profile.get("test_commands", ["pytest -q"]):
+    for cmd in apply_cmds:
+        result = _run_shell(cmd, workspace)
+        result["phase"] = "migration_apply"
+        steps.append(result)
+        if result["exit_code"] != 0:
+            return {
+                "success": False,
+                "phase": "migration_apply",
+                "command": cmd,
+                "steps": steps,
+                "output": result["output"],
+            }
+
+    for cmd in profile.get("lint_commands", []):
+        result = _run_shell(cmd, workspace)
+        result["phase"] = "lint"
+        steps.append(result)
+        if result["exit_code"] != 0:
+            return {
+                "success": False,
+                "phase": "lint",
+                "command": cmd,
+                "steps": steps,
+                "output": result["output"],
+            }
+
+    test_commands = profile.get("test_commands", ["pytest -q"])
+    if not test_commands:
+        return {"success": False, "phase": "test", "output": "No test commands configured.", "steps": steps}
+
+    for cmd in test_commands:
         result = _run_shell(cmd, workspace)
         result["phase"] = "test"
-        if result["exit_code"] == 0:
-            return {"success": True, "command": cmd, "output": result["output"], "steps": setup_output + [result]}
-        return {"success": False, "command": cmd, "output": result["output"], "steps": setup_output + [result]}
+        steps.append(result)
+        if result["exit_code"] != 0:
+            return {
+                "success": False,
+                "phase": "test",
+                "command": cmd,
+                "steps": steps,
+                "output": result["output"],
+                "migration": {
+                    "applied": bool(apply_cmds),
+                    "rolled_back": False,
+                    "reapplied": False,
+                },
+            }
 
-    return {"success": False, "output": "No test commands configured."}
+    rolled_back = False
+    reapplied = False
+    if apply_cmds and rollback_cmds:
+        for cmd in rollback_cmds:
+            result = _run_shell(cmd, workspace)
+            result["phase"] = "migration_rollback"
+            steps.append(result)
+            if result["exit_code"] != 0:
+                return {
+                    "success": False,
+                    "phase": "migration_rollback",
+                    "command": cmd,
+                    "steps": steps,
+                    "output": result["output"],
+                }
+        rolled_back = True
+
+        for cmd in apply_cmds:
+            result = _run_shell(cmd, workspace)
+            result["phase"] = "migration_reapply"
+            steps.append(result)
+            if result["exit_code"] != 0:
+                return {
+                    "success": False,
+                    "phase": "migration_reapply",
+                    "command": cmd,
+                    "steps": steps,
+                    "output": result["output"],
+                }
+        reapplied = True
+
+        for cmd in test_commands:
+            result = _run_shell(cmd, workspace)
+            result["phase"] = "test_after_reapply"
+            steps.append(result)
+            if result["exit_code"] != 0:
+                return {
+                    "success": False,
+                    "phase": "test_after_reapply",
+                    "command": cmd,
+                    "steps": steps,
+                    "output": result["output"],
+                    "migration": {
+                        "applied": True,
+                        "rolled_back": True,
+                        "reapplied": True,
+                    },
+                }
+
+    return {
+        "success": True,
+        "command": test_commands[-1],
+        "output": steps[-1]["output"] if steps else "",
+        "steps": steps,
+        "migration": {
+            "applied": bool(apply_cmds),
+            "rolled_back": rolled_back,
+            "reapplied": reapplied,
+            "engine": migration.get("engine", ""),
+        },
+    }
+
+
+def _load_optional_json(path: Path) -> dict[str, Any] | None:
+    if not path.exists():
+        return None
+    return json.loads(path.read_text(encoding="utf-8"))
 
 
 def _run_shell(command: str, workspace: str) -> dict:

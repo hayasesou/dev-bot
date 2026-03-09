@@ -53,7 +53,7 @@ class FileStateStore:
     def update_status(self, thread_id: int, status: str) -> None:
         self.update_meta(thread_id, status=status)
 
-    def update_meta(self, thread_id: int, **fields: str) -> None:
+    def update_meta(self, thread_id: int, **fields: object) -> None:
         run_dir = self.runs_root / str(thread_id)
         meta_path = run_dir / "meta.json"
         if not meta_path.exists():
@@ -69,6 +69,11 @@ class FileStateStore:
         run_dir = self.runs_root / str(thread_id)
         run_dir.mkdir(parents=True, exist_ok=True)
         self._write_json(run_dir / filename, payload)
+
+    def delete_artifact(self, thread_id: int, filename: str) -> None:
+        path = self.runs_root / str(thread_id) / filename
+        if path.exists():
+            path.unlink()
 
     def load_meta(self, thread_id: int) -> dict:
         meta_path = self.runs_root / str(thread_id) / "meta.json"

@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import json
 import subprocess
+from dataclasses import dataclass
 from pathlib import Path
 
 import discord
@@ -14,6 +15,14 @@ from app.state_store import FileStateStore
 from app.workspace_manager import WorkspaceManager
 
 
+@dataclass
+class ActiveRun:
+    task: asyncio.Task[None] | None = None
+    process: subprocess.Popen[str] | None = None
+    artifacts_dir: str = ""
+    abort_requested: bool = False
+
+
 class DevelopmentPipeline:
     def __init__(self, settings: Settings, state_store: FileStateStore, github_client: GitHubIssueClient) -> None:
         self.settings = settings
@@ -21,15 +30,61 @@ class DevelopmentPipeline:
         self.github_client = github_client
         self.workspace_manager = WorkspaceManager(settings)
         self.local_runner = LocalRunner(settings)
+        self._active_runs: dict[int, ActiveRun] = {}
+
+    def start(self, client: discord.Client, thread: discord.Thread, repo_full_name: str, issue: dict) -> bool:
+        active = self._active_runs.get(thread.id)
+        if active and active.task and not active.task.done():
+            return False
+        task = asyncio.create_task(
+            self.run(
+                client=client,
+                thread=thread,
+                repo_full_name=repo_full_name,
+                issue=issue,
+            )
+        )
+        self._active_runs[thread.id] = ActiveRun(task=task)
+        task.add_done_callback(lambda done_task, thread_id=thread.id: self._finalize_active_run(thread_id, done_task))
+        return True
+
+    def is_running(self, thread_id: int) -> bool:
+        active = self._active_runs.get(thread_id)
+        return bool(active and active.task and not active.task.done())
+
+    async def abort(self, thread_id: int) -> bool:
+        active = self._active_runs.get(thread_id)
+        if not active:
+            return False
+        active.abort_requested = True
+        if active.process is not None and await asyncio.to_thread(active.process.poll) is None:
+            await asyncio.to_thread(self._terminate_process, active.process)
+            return True
+        if active.task is not None and not active.task.done():
+            active.task.cancel()
+            return True
+        return False
 
     async def run(self, client: discord.Client, thread: discord.Thread, repo_full_name: str, issue: dict) -> None:
+        del client
         thread_id = thread.id
+        active = self._active_runs.setdefault(thread_id, ActiveRun(task=asyncio.current_task()))
+        if active.task is None:
+            active.task = asyncio.current_task()
+
         summary = self.state_store.load_artifact(thread_id, "requirement_summary.json")
-        self.state_store.update_status(thread_id, "workspace_preparing")
-        await thread.send("開発パイプラインを開始します。まずワークスペースを準備します。")
+        plan = self.state_store.load_artifact(thread_id, "plan.json")
+        test_plan = self.state_store.load_artifact(thread_id, "test_plan.json")
+        artifacts_dir = ""
         try:
+            self.state_store.update_status(thread_id, "workspace_preparing")
+            await thread.send("開発パイプラインを開始します。まずワークスペースを準備します。")
+            self._raise_if_aborted(thread_id)
             workspace_info = await asyncio.to_thread(
-                self.workspace_manager.prepare, repo_full_name, int(issue["number"]), thread_id
+                self.workspace_manager.prepare,
+                repo_full_name,
+                int(issue["number"]),
+                thread_id,
             )
             self.state_store.write_artifact(thread_id, "workspace.json", workspace_info)
             self.state_store.update_meta(
@@ -42,16 +97,28 @@ class DevelopmentPipeline:
             await thread.send(
                 f"ローカル実行を開始します。\n- branch: `{workspace_info['branch_name']}`\n- base: `{workspace_info['base_branch']}`"
             )
+
+            self._raise_if_aborted(thread_id)
             cmd, env, artifacts_dir = await asyncio.to_thread(
                 self.local_runner.prepare_run,
                 workspace=workspace_info["workspace"],
                 run_dir=workspace_info["run_root"],
                 requirement_summary=summary,
                 issue=issue,
+                plan=plan if isinstance(plan, dict) else None,
+                test_plan=test_plan if isinstance(test_plan, dict) else None,
             )
+            active.artifacts_dir = artifacts_dir
             process = await asyncio.to_thread(self.local_runner.start_process, cmd, env)
-            await self._monitor_local_run(thread.id, thread, process, artifacts_dir)
+            active.process = process
+
+            await self._monitor_local_run(thread_id, thread, process, artifacts_dir)
             output, _ = await asyncio.to_thread(process.communicate)
+            if active.abort_requested:
+                self.state_store.update_status(thread_id, "aborted")
+                self._persist_activity_artifacts(thread_id, artifacts_dir)
+                await thread.send("実行を停止しました。")
+                return
             if process.returncode != 0:
                 self.state_store.update_status(thread_id, "failed")
                 self._persist_activity_artifacts(thread_id, artifacts_dir)
@@ -61,6 +128,7 @@ class DevelopmentPipeline:
                     f"直近ログ:\n```text\n{output.strip()[-1500:]}\n```"
                 )
                 return
+
             result = await asyncio.to_thread(self.local_runner.load_final_result, artifacts_dir)
             self.state_store.write_artifact(thread_id, "final_result.json", result)
             self._persist_activity_artifacts(thread_id, artifacts_dir)
@@ -68,17 +136,20 @@ class DevelopmentPipeline:
                 self.state_store.update_status(thread_id, "failed")
                 failure = self.local_runner.load_optional_artifact(artifacts_dir, "agent_failure.json")
                 details = ""
-                if failure:
+                if isinstance(failure, dict) and failure:
                     details = f"\n最後のエラー: {failure.get('message', '')}"
                 await thread.send(
-                    "自動実装は停止しました。テストが通りませんでした。`/status` で状態を確認してください。"
+                    "自動実装は停止しました。テストが通りませんでした。`/status` と `/why-failed` で状態を確認してください。"
                     f"{details}"
                 )
                 return
 
             await thread.send("テストが通りました。ブランチを push して PR を作成します。")
             pushed = await asyncio.to_thread(
-                self._commit_and_push, workspace_info["workspace"], workspace_info["branch_name"], issue["number"]
+                self._commit_and_push,
+                workspace_info["workspace"],
+                workspace_info["branch_name"],
+                issue["number"],
             )
             if not pushed:
                 self.state_store.update_status(thread_id, "failed")
@@ -94,14 +165,28 @@ class DevelopmentPipeline:
                 draft=True,
             )
             self.state_store.write_artifact(thread_id, "pr.json", pr)
-            self.state_store.update_meta(thread_id, status="completed", pr_number=str(pr["number"]), pr_url=pr["url"])
+            self.state_store.update_meta(
+                thread_id,
+                status="completed",
+                pr_number=str(pr["number"]),
+                pr_url=pr["url"],
+            )
             await thread.send(f"PR を作成しました。\n- PR: #{pr['number']}\n- URL: {pr['url']}")
+        except asyncio.CancelledError:
+            self.state_store.update_status(thread_id, "aborted")
+            if artifacts_dir:
+                self._persist_activity_artifacts(thread_id, artifacts_dir)
+            await thread.send("実行を停止しました。")
         except subprocess.CalledProcessError as exc:
-            self.state_store.update_status(thread_id, "failed")
-            await thread.send(f"コマンド実行で失敗しました: `{exc}`")
+            status = "aborted" if active.abort_requested else "failed"
+            self.state_store.update_status(thread_id, status)
+            await thread.send("実行を停止しました。" if active.abort_requested else f"コマンド実行で失敗しました: `{exc}`")
         except Exception as exc:
-            self.state_store.update_status(thread_id, "failed")
-            await thread.send(f"パイプラインが失敗しました: `{exc}`")
+            status = "aborted" if active.abort_requested else "failed"
+            self.state_store.update_status(thread_id, status)
+            await thread.send("実行を停止しました。" if active.abort_requested else f"パイプラインが失敗しました: `{exc}`")
+        finally:
+            active.process = None
 
     async def _monitor_local_run(
         self,
@@ -120,7 +205,7 @@ class DevelopmentPipeline:
         while True:
             returncode = await asyncio.to_thread(process.poll)
             current = self._read_json(activity_path)
-            if current:
+            if isinstance(current, dict):
                 self.state_store.write_artifact(thread_id, "current_activity.json", current)
                 sequence = int(current.get("sequence", 0))
                 notify = bool(current.get("notify"))
@@ -136,10 +221,20 @@ class DevelopmentPipeline:
                 self.state_store.write_artifact(thread_id, "activity_history.json", {"items": history[-20:]})
             if returncode is not None:
                 break
+            self._raise_if_aborted(thread_id)
             await asyncio.sleep(2)
 
     def _persist_activity_artifacts(self, thread_id: int, artifacts_dir: str) -> None:
-        for filename in ("current_activity.json", "activity_history.json", "agent_failure.json", "last_failure.json"):
+        for filename in (
+            "current_activity.json",
+            "activity_history.json",
+            "agent_failure.json",
+            "last_failure.json",
+            "agent_result.json",
+            "verification_result.json",
+            "verification_history.json",
+            "repo_profile.json",
+        ):
             payload = self.local_runner.load_optional_artifact(artifacts_dir, filename)
             if payload:
                 self.state_store.write_artifact(thread_id, filename, payload)
@@ -194,3 +289,27 @@ class DevelopmentPipeline:
             f"- Discordスレッド: {thread_url}\n"
             f"- 自動生成PRです\n"
         )
+
+    def _raise_if_aborted(self, thread_id: int) -> None:
+        active = self._active_runs.get(thread_id)
+        if active and active.abort_requested:
+            raise asyncio.CancelledError
+
+    def _finalize_active_run(self, thread_id: int, task: asyncio.Task[None]) -> None:
+        try:
+            task.exception()
+        except asyncio.CancelledError:
+            pass
+        active = self._active_runs.get(thread_id)
+        if active and active.task is task:
+            self._active_runs.pop(thread_id, None)
+
+    def _terminate_process(self, process: subprocess.Popen[str]) -> None:
+        if process.poll() is not None:
+            return
+        process.terminate()
+        try:
+            process.wait(timeout=5)
+        except subprocess.TimeoutExpired:
+            process.kill()
+            process.wait(timeout=5)

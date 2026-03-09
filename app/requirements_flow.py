@@ -46,7 +46,7 @@ class RequirementsFlow:
         body = (
             "整理済み要件です。\n\n"
             f"{summary}\n\n"
-            "この内容で進める場合は `/confirm`、修正したい場合はそのまま追記してください。"
+            "この内容で進める場合は `/plan repo:owner/repo`、修正したい場合はそのまま追記してください。"
         )
         return RequirementReply(
             body=body,

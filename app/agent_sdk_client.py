@@ -45,6 +45,7 @@ class ClaudeAgentClient:
         setting_sources: list[str] | None = None,
         hooks: dict[str, list[Any]] | None = None,
         agents: dict[str, Any] | None = None,
+        output_schema: dict[str, Any] | None = None,
     ) -> dict:
         result = self.run_text(
             system=system,
@@ -56,7 +57,7 @@ class ClaudeAgentClient:
             setting_sources=setting_sources,
             hooks=hooks,
             agents=agents,
-            output_schema={"type": "object"},
+            output_schema=output_schema or {"type": "object"},
         )
         if isinstance(result.structured_output, dict):
             return result.structured_output
@@ -366,6 +367,22 @@ def _build_options(
 
 
 async def _collect_client_json_response(client: Any) -> dict[str, Any]:
+    result = await _collect_client_agent_result(client)
+    if isinstance(result.structured_output, dict):
+        return result.structured_output
+    text = result.result.strip()
+    if not text:
+        raise RuntimeError("Claude Agent SDK returned an empty response when JSON was expected.")
+    try:
+        return json.loads(text)
+    except json.JSONDecodeError:
+        extracted = _extract_json_object(text)
+        if extracted is not None:
+            return extracted
+        raise RuntimeError(f"Claude Agent SDK did not return valid JSON. Raw response: {text[:500]!r}")
+
+
+async def _collect_client_agent_result(client: Any) -> AgentResult:
     from claude_agent_sdk import AssistantMessage, ResultMessage, TextBlock
 
     assistant_chunks: list[str] = []
@@ -381,18 +398,13 @@ async def _collect_client_json_response(client: Any) -> dict[str, Any]:
             final_result = message
     if final_result is None:
         raise RuntimeError("Claude Agent SDK returned no final result.")
-    if isinstance(final_result.structured_output, dict):
-        return final_result.structured_output
-    text = (final_result.result or "\n".join(assistant_chunks)).strip()
-    if not text:
-        raise RuntimeError("Claude Agent SDK returned an empty response when JSON was expected.")
-    try:
-        return json.loads(text)
-    except json.JSONDecodeError:
-        extracted = _extract_json_object(text)
-        if extracted is not None:
-            return extracted
-        raise RuntimeError(f"Claude Agent SDK did not return valid JSON. Raw response: {text[:500]!r}")
+    return AgentResult(
+        result=(final_result.result or "\n".join(assistant_chunks)).strip(),
+        structured_output=final_result.structured_output,
+        session_id=final_result.session_id,
+        total_cost_usd=final_result.total_cost_usd,
+        usage=final_result.usage,
+    )
 
 
 def _resolve_claude_cli() -> str:

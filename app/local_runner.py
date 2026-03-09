@@ -13,13 +13,28 @@ class LocalRunner:
     def __init__(self, settings: Settings) -> None:
         self.settings = settings
 
-    def prepare_run(self, workspace: str, run_dir: str, requirement_summary: dict, issue: dict) -> tuple[list[str], dict[str, str], str]:
+    def prepare_run(
+        self,
+        workspace: str,
+        run_dir: str,
+        requirement_summary: dict,
+        issue: dict,
+        plan: dict | None = None,
+        test_plan: dict | None = None,
+    ) -> tuple[list[str], dict[str, str], str]:
         artifacts_dir = Path(run_dir) / "artifacts"
         artifacts_dir.mkdir(parents=True, exist_ok=True)
         summary_path = artifacts_dir / "requirement_summary.json"
         issue_path = artifacts_dir / "issue.json"
         summary_path.write_text(json.dumps(requirement_summary, ensure_ascii=False, indent=2), encoding="utf-8")
         issue_path.write_text(json.dumps(issue, ensure_ascii=False, indent=2), encoding="utf-8")
+        if isinstance(plan, dict):
+            (artifacts_dir / "plan.json").write_text(json.dumps(plan, ensure_ascii=False, indent=2), encoding="utf-8")
+        if isinstance(test_plan, dict):
+            (artifacts_dir / "test_plan.json").write_text(
+                json.dumps(test_plan, ensure_ascii=False, indent=2),
+                encoding="utf-8",
+            )
 
         env = os.environ.copy()
         if self.settings.anthropic_api_key:
