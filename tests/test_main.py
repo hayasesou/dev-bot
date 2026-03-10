@@ -1,0 +1,39 @@
+from __future__ import annotations
+
+import importlib
+import io
+import unittest
+from types import SimpleNamespace
+from unittest.mock import patch
+
+
+class MainModuleTests(unittest.TestCase):
+    def test_import_succeeds_without_discord_installed(self) -> None:
+        module = importlib.import_module("app.main")
+
+        self.assertTrue(hasattr(module, "main"))
+
+    def test_main_reports_missing_discord_dependency_cleanly(self) -> None:
+        module = importlib.import_module("app.main")
+        settings = SimpleNamespace(
+            discord_bot_token="token",
+            github_token="token",
+            github_app_id="1",
+            github_app_private_key_path="/dev/null",
+            github_app_installation_id="1",
+            github_project_id="",
+            github_project_state_field_id="",
+            github_project_state_option_ids="",
+            ensure_runtime_paths=lambda: None,
+        )
+
+        with (
+            patch.object(module, "load_settings", return_value=settings),
+            patch.object(module, "validate_settings", return_value=[]),
+            patch.object(module.GitHubIssueClient, "preflight", return_value={"ok": True, "repo_count": 0, "sample_repos": []}),
+            patch("sys.stdout", new_callable=io.StringIO) as stdout,
+        ):
+            result = module.main()
+
+        self.assertEqual(1, result)
+        self.assertIn("Discord dependency is not installed", stdout.getvalue())

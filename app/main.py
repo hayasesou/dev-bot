@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 from app.config import ValidationError, load_settings, validate_settings
-from app.discord_adapter import build_client
 from app.github_client import GitHubIssueClient
 
 
@@ -47,7 +46,21 @@ def main() -> int:
             f" fallback={github_preflight.get('fallback_repos', [])}"
         )
 
-    client = build_client(settings)
+    try:
+        from app.discord_adapter import build_client
+    except ModuleNotFoundError as exc:
+        if exc.name == "discord":
+            print("Discord dependency is not installed. Install runtime dependencies before starting the bot.")
+            return 1
+        raise
+
+    try:
+        client = build_client(settings)
+    except RuntimeError as exc:
+        if "discord.py is not installed" in str(exc):
+            print("Discord dependency is not installed. Install runtime dependencies before starting the bot.")
+            return 1
+        raise
     client.run(settings.discord_bot_token)
     return 0
 
