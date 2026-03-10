@@ -6,9 +6,7 @@ import subprocess
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Any
-
-import discord
+from typing import Any, Protocol
 
 from app.approvals import ApprovalCoordinator, is_high_risk_command
 from app.config import Settings
@@ -28,6 +26,14 @@ class ExecutionContext:
     run_id: str
     repo_full_name: str
     issue: dict[str, Any]
+
+
+class ChatChannel(Protocol):
+    async def send(self, content: str) -> None: ...
+
+
+class ChatClient(Protocol):
+    def get_channel(self, channel_id: int) -> ChatChannel | None: ...
 
 
 class DevelopmentPipeline:
@@ -63,14 +69,18 @@ class DevelopmentPipeline:
     async def execute_run(
         self,
         *,
-        client: discord.Client,
+        client: ChatClient | None = None,
+        chat: ChatClient | None = None,
         thread_id: int,
         repo_full_name: str,
         issue: dict[str, Any],
     ) -> None:
-        channel = client.get_channel(thread_id)
-        if not isinstance(channel, discord.Thread):
-            raise RuntimeError(f"Discord thread not found for thread_id={thread_id}")
+        chat_client = client or chat
+        if chat_client is None:
+            raise RuntimeError("A chat client is required to execute a run.")
+        channel = chat_client.get_channel(thread_id)
+        if channel is None or not hasattr(channel, "send"):
+            raise RuntimeError(f"Chat channel not found for thread_id={thread_id}")
 
         summary = self.state_store.load_artifact(thread_id, "requirement_summary.json")
         plan = self.state_store.load_artifact(thread_id, "plan.json")
@@ -245,7 +255,7 @@ class DevelopmentPipeline:
             run_id=run_id,
         )
         command_results = await self.execute_workflow_commands(
-            client=client,
+            client=chat_client,
             channel=channel,
             workspace=workspace_info["workspace"],
             workflow=workflow,
@@ -423,7 +433,8 @@ class DevelopmentPipeline:
             return
 
         pr_title = f"feat: {issue['title']}"
-        pr_body = self._build_pr_body(issue, channel.jump_url, changed_files, command_results, verification, review)
+        channel_url = getattr(channel, "channel_url", getattr(channel, "jump_url", ""))
+        pr_body = self._build_pr_body(issue, channel_url, changed_files, command_results, verification, review)
         pr = await asyncio.to_thread(
             self.github_client.create_pull_request,
             repo_full_name=repo_full_name,
@@ -435,7 +446,7 @@ class DevelopmentPipeline:
         )
         self.state_store.write_artifact(thread_id, "pr.json", pr)
         self.state_store.write_execution_artifact(thread_id, "pr.json", pr, run_id)
-        comment_body = self._build_pr_comment(channel.jump_url, verification, review, command_results)
+        comment_body = self._build_pr_comment(channel_url, verification, review, command_results)
         await asyncio.to_thread(
             self.github_client.create_issue_comment,
             repo_full_name,
@@ -555,8 +566,8 @@ class DevelopmentPipeline:
     async def execute_workflow_commands(
         self,
         *,
-        client: discord.Client,
-        channel: discord.Thread,
+        client: ChatClient,
+        channel: ChatChannel,
         workspace: str,
         workflow: dict[str, Any],
         thread_id: int,

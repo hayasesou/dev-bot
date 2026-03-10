@@ -6,8 +6,131 @@ import subprocess
 from pathlib import Path
 from typing import Any
 
-import discord
-from discord import app_commands
+try:
+    import discord
+    from discord import app_commands
+
+    DISCORD_AVAILABLE = True
+except ModuleNotFoundError:  # pragma: no cover - depends on local test env
+    DISCORD_AVAILABLE = False
+
+    class _StubClient:
+        def __init__(self, *args: Any, **kwargs: Any) -> None:
+            del args, kwargs
+
+    class _StubThread:
+        id = 0
+        jump_url = ""
+
+        async def send(self, *args: Any, **kwargs: Any) -> None:
+            del args, kwargs
+
+    class _StubIntents:
+        message_content = False
+
+        @classmethod
+        def default(cls) -> "_StubIntents":
+            return cls()
+
+    class _StubResponse:
+        def is_done(self) -> bool:
+            return False
+
+        async def send_message(self, *args: Any, **kwargs: Any) -> None:
+            del args, kwargs
+
+        async def defer(self, *args: Any, **kwargs: Any) -> None:
+            del args, kwargs
+
+    class _StubFollowup:
+        async def send(self, *args: Any, **kwargs: Any) -> None:
+            del args, kwargs
+
+    class _StubInteraction:
+        response = _StubResponse()
+        followup = _StubFollowup()
+        channel = None
+        user = None
+
+    class _StubView:
+        def __init__(self, *args: Any, **kwargs: Any) -> None:
+            del args, kwargs
+
+    class _StubCommand:
+        def __init__(self, *args: Any, **kwargs: Any) -> None:
+            del args, kwargs
+
+        def autocomplete(self, *args: Any, **kwargs: Any):
+            del args, kwargs
+
+            def _decorator(func: Any) -> Any:
+                return func
+
+            return _decorator
+
+    class _StubCommandTree:
+        def __init__(self, *args: Any, **kwargs: Any) -> None:
+            del args, kwargs
+
+        def add_command(self, *args: Any, **kwargs: Any) -> None:
+            del args, kwargs
+
+        def copy_global_to(self, *args: Any, **kwargs: Any) -> None:
+            del args, kwargs
+
+        async def sync(self, *args: Any, **kwargs: Any) -> None:
+            del args, kwargs
+
+    class _StubChoice:
+        def __init__(self, *args: Any, **kwargs: Any) -> None:
+            del args, kwargs
+
+        @classmethod
+        def __class_getitem__(cls, item: Any) -> type["_StubChoice"]:
+            del item
+            return cls
+
+    class _StubAppCommands:
+        CommandTree = _StubCommandTree
+        Command = _StubCommand
+        Choice = _StubChoice
+
+    class _StubButtonStyle:
+        success = 1
+        danger = 2
+
+    class _StubHTTPException(Exception):
+        code: int | None = None
+
+    class _StubDiscordModule:
+        Client = _StubClient
+        Thread = _StubThread
+        Interaction = _StubInteraction
+        Message = object
+        Object = object
+        HTTPException = _StubHTTPException
+        Intents = _StubIntents
+        ButtonStyle = _StubButtonStyle
+
+        class abc:
+            Messageable = object
+            GuildChannel = object
+
+        class ui:
+            View = _StubView
+            Button = object
+
+            @staticmethod
+            def button(*args: Any, **kwargs: Any):
+                del args, kwargs
+
+                def _decorator(func: Any) -> Any:
+                    return func
+
+                return _decorator
+
+    discord = _StubDiscordModule()
+    app_commands = _StubAppCommands()
 
 from app.approvals import ApprovalCoordinator
 from app.agent_sdk_client import (
@@ -19,15 +142,22 @@ from app.agent_sdk_client import (
     AgentRateLimitError,
     AgentTimeoutError,
 )
+from app.chat_inputs import chunk_message, ensure_new_thread_body, materialize_message_payload, parse_message_inputs
 from app.config import Settings
+from app.discord_presenters import (
+    format_budget_message,
+    format_plan_message,
+    format_status_message,
+    format_why_failed_message,
+)
 from app.github_client import GitHubIssueClient
-from app.issue_draft import build_issue_body, build_issue_title
 from app.orchestrator import Orchestrator, WorkItem
 from app.pipeline import DevelopmentPipeline
 from app.planning_agent import PlanningAgent
 from app.process_registry import ProcessRegistry
 from app.repo_profiler import build_repo_profile
 from app.requirements_agent import RequirementsAgent
+from app.run_request import ensure_issue_and_enqueue
 from app.state_store import FileStateStore
 
 
@@ -53,9 +183,6 @@ DERIVED_ARTIFACTS = (
     "command_results.json",
 )
 
-ALLOWED_ATTACHMENT_SUFFIXES = {".txt", ".md", ".json"}
-MAX_ATTACHMENTS_PER_MESSAGE = 3
-MAX_ATTACHMENT_BYTES = 2 * 1024 * 1024
 MAX_DISCORD_MESSAGE_LENGTH = 2000
 
 
@@ -228,103 +355,18 @@ class DevBotClient(discord.Client):
         parsed = await self._parse_message_inputs(message)
         if parsed["error"]:
             return parsed
-        body = str(parsed["body"]).strip()
-        if not body:
-            parsed["error"] = (
-                "本文か対応添付ファイルが必要です。`txt` `md` `json` を最大3件、各2MB以内で再送してください。"
-            )
-        return parsed
+        return ensure_new_thread_body(parsed)
 
     async def _parse_message_inputs(self, message: discord.Message) -> dict[str, Any]:
-        attachments = list(message.attachments)
-        if len(attachments) > MAX_ATTACHMENTS_PER_MESSAGE:
-            return {
-                "error": f"添付は最大{MAX_ATTACHMENTS_PER_MESSAGE}件までです。必要なファイルだけ再送してください。",
-                "body": "",
-                "attachments": [],
-            }
-
-        parsed_attachments: list[dict[str, str]] = []
-        for attachment in attachments:
-            suffix = Path(attachment.filename).suffix.lower()
-            if suffix not in ALLOWED_ATTACHMENT_SUFFIXES:
-                allowed = ", ".join(sorted(ALLOWED_ATTACHMENT_SUFFIXES))
-                return {
-                    "error": (
-                        f"`{attachment.filename}` は非対応形式です。"
-                        f" {allowed} のいずれかにして再送してください。"
-                    ),
-                    "body": "",
-                    "attachments": [],
-                }
-            if attachment.size > MAX_ATTACHMENT_BYTES:
-                return {
-                    "error": (
-                        f"`{attachment.filename}` はサイズ上限を超えています。"
-                        " 2MB 以下にして再送してください。"
-                    ),
-                    "body": "",
-                    "attachments": [],
-                }
-            raw = await attachment.read()
-            try:
-                text = raw.decode("utf-8")
-            except UnicodeDecodeError:
-                text = raw.decode("utf-8", errors="replace")
-            parsed_attachments.append(
-                {
-                    "filename": attachment.filename,
-                    "content": text,
-                    "url": attachment.url,
-                }
-            )
-
-        content = message.content.strip()
-        body_parts: list[str] = []
-        if content:
-            body_parts.append(content)
-        for item in parsed_attachments:
-            body_parts.append(
-                "\n".join(
-                    [
-                        f"[attachment:{item['filename']}]",
-                        item["content"],
-                        f"[/attachment:{item['filename']}]",
-                    ]
-                )
-            )
-        return {
-            "error": "",
-            "body": "\n\n".join(part for part in body_parts if part.strip()),
-            "attachments": parsed_attachments,
-        }
+        return await parse_message_inputs(message)
 
     async def _materialize_message_payload(self, thread_id: int, message: discord.Message, parsed: dict[str, Any]) -> str:
-        attachments = parsed.get("attachments", [])
-        materialized: list[dict[str, str]] = []
-        for item in attachments:
-            safe_name = self._safe_attachment_name(message.id, str(item["filename"]))
-            saved_path = self.state_store.write_attachment_text(thread_id, safe_name, str(item["content"]))
-            materialized.append(
-                {
-                    "filename": str(item["filename"]),
-                    "saved_path": saved_path,
-                    "url": str(item["url"]),
-                }
-            )
-        payload = str(parsed.get("body", "")).strip()
-        if materialized:
-            payload += (
-                "\n\n[attachment-metadata]\n"
-                + json.dumps({"items": materialized}, ensure_ascii=False, indent=2)
-            )
-        return payload.strip()
-
-    def _safe_attachment_name(self, message_id: int, filename: str) -> str:
-        suffix = Path(filename).suffix
-        stem = Path(filename).stem
-        sanitized = "".join(ch if ch.isalnum() or ch in {"-", "_"} else "_" for ch in stem)[:80] or "attachment"
-        return f"{message_id}_{sanitized}{suffix}"
+        return materialize_message_payload(
+            thread_id=thread_id,
+            message_id=message.id,
+            parsed=parsed,
+            state_store=self.state_store,
+        )
 
     async def _send_channel_text(self, channel: discord.abc.Messageable, content: str) -> None:
         for chunk in self._chunk_message(content):
@@ -352,19 +394,7 @@ class DevBotClient(discord.Client):
                 raise
 
     def _chunk_message(self, content: str) -> list[str]:
-        if len(content) <= MAX_DISCORD_MESSAGE_LENGTH:
-            return [content]
-        chunks: list[str] = []
-        remaining = content
-        while len(remaining) > MAX_DISCORD_MESSAGE_LENGTH:
-            split_at = remaining.rfind("\n", 0, MAX_DISCORD_MESSAGE_LENGTH)
-            if split_at <= 0:
-                split_at = MAX_DISCORD_MESSAGE_LENGTH
-            chunks.append(remaining[:split_at].rstrip())
-            remaining = remaining[split_at:].lstrip("\n")
-        if remaining:
-            chunks.append(remaining)
-        return chunks or [""]
+        return chunk_message(content, max_length=MAX_DISCORD_MESSAGE_LENGTH)
 
     async def plan_command(self, interaction: discord.Interaction, repo: str) -> None:
         await self._generate_plan(interaction, repo, alias_used=False)
@@ -409,56 +439,26 @@ class DevBotClient(discord.Client):
         current_activity = self.state_store.load_artifact(thread_id, "current_activity.json")
         process = self.process_registry.load(thread_id)
         runtime_active = self.orchestrator.is_running(thread_id) or self.orchestrator.is_queued(thread_id) or bool(process)
-        lines = [
-            f"status: `{meta.get('status', 'unknown')}`",
-            f"thread_id: `{thread_id}`",
-            f"running: `{runtime_active}`",
-            f"attempts: `{meta.get('attempt_count', 0)}`",
-        ]
-        if meta.get("github_repo"):
-            lines.append(f"repo: `{meta.get('github_repo')}`")
-        if summary:
-            lines.append(f"goal: {summary.get('goal', '(no goal)')}")
-        if plan:
-            lines.append(f"plan: `{len(plan.get('implementation_steps', []))}` steps")
-        if test_plan:
-            lines.append(f"test_plan: `{len(test_plan.get('cases', []))}` cases")
-        if isinstance(planning_progress, dict) and planning_progress:
-            current = int(planning_progress.get("current", 0))
-            total = int(planning_progress.get("total", 0))
-            phase = str(planning_progress.get("phase", ""))
-            if total > 0:
-                lines.append(f"planning_progress: `{phase} {current}/{total}`")
-            elif phase:
-                lines.append(f"planning_progress: `{phase}`")
-        if isinstance(current_activity, dict) and current_activity:
-            phase = str(current_activity.get("phase", "")).strip()
-            summary_text = str(current_activity.get("summary", "")).strip()
-            status_text = str(current_activity.get("status", "")).strip()
-            timestamp = str(current_activity.get("timestamp", "")).strip()
-            if phase or summary_text:
-                lines.append(f"activity: `{phase or 'unknown'}` `{status_text or 'unknown'}`")
-            if summary_text:
-                lines.append(f"activity_summary: {summary_text}")
-            if timestamp:
-                lines.append(f"activity_updated_at: `{timestamp}`")
-        if issue:
-            lines.append(f"issue: [#{issue.get('number')}]({issue.get('url')})")
-        if pr:
-            lines.append(f"pr: [#{pr.get('number')}]({pr.get('url')})")
-        if verification:
-            lines.append(f"verification: `{verification.get('status', 'unknown')}`")
-        if review:
-            lines.append(f"review: `{review.get('decision', 'unknown')}`")
-        if isinstance(pending_approval, dict) and pending_approval.get("status") == "pending":
-            lines.append(
-                "pending_approval: "
-                f"`{pending_approval.get('tool_name', 'unknown')}` "
-                f"- {pending_approval.get('input_text', '')}"
-            )
-        if process:
-            lines.append(f"process: pid=`{process.get('pid')}` pgid=`{process.get('pgid')}`")
-        await self._send_interaction_text(interaction, "\n".join(lines), ephemeral=True)
+        await self._send_interaction_text(
+            interaction,
+            format_status_message(
+                thread_id=thread_id,
+                meta=meta,
+                issue=issue,
+                pr=pr,
+                summary=summary,
+                plan=plan,
+                test_plan=test_plan,
+                verification=verification,
+                review=review,
+                pending_approval=pending_approval,
+                planning_progress=planning_progress,
+                current_activity=current_activity,
+                process=process,
+                runtime_active=runtime_active,
+            ),
+            ephemeral=True,
+        )
 
     async def issue_command(self, interaction: discord.Interaction) -> None:
         thread_id = self._ensure_managed_thread(interaction.channel)
@@ -569,48 +569,15 @@ class DevBotClient(discord.Client):
         last_failure = self.state_store.load_artifact(thread_id, "last_failure.json")
         verification = self.state_store.load_artifact(thread_id, "verification_summary.json")
         final_result = self.state_store.load_artifact(thread_id, "final_result.json")
-        lines = ["直近の失敗要約"]
-        if isinstance(last_failure, dict) and last_failure:
-            if last_failure.get("stage"):
-                lines.append(f"- stage: `{last_failure.get('stage')}`")
-            if last_failure.get("message"):
-                lines.append(f"- message: {last_failure.get('message')}")
-            details = last_failure.get("details")
-            if isinstance(details, dict):
-                repo = str(details.get("repo", "")).strip()
-                if repo:
-                    lines.append(f"- repo: `{repo}`")
-                planning_progress = details.get("planning_progress")
-                if isinstance(planning_progress, dict) and planning_progress:
-                    phase = str(planning_progress.get("phase", "")).strip()
-                    current = int(planning_progress.get("current", 0))
-                    total = int(planning_progress.get("total", 0))
-                    acceptance = str(planning_progress.get("acceptance_criterion", "")).strip()
-                    last_session_id = str(planning_progress.get("last_session_id", "")).strip()
-                    if total > 0:
-                        lines.append(f"- planning_progress: `{phase} {current}/{total}`")
-                    elif phase:
-                        lines.append(f"- planning_progress: `{phase}`")
-                    if acceptance:
-                        lines.append(f"- acceptance_criterion: {acceptance}")
-                    if last_session_id:
-                        lines.append(f"- planning_session: `{last_session_id}`")
-            stderr_lines = last_failure.get("stderr")
-            if isinstance(stderr_lines, list):
-                for item in stderr_lines[-3:]:
-                    snippet = str(item).strip()
-                    if snippet:
-                        lines.append(f"- stderr: {snippet[:400]}")
-        if isinstance(verification, dict) and verification:
-            lines.append(f"- status: `{verification.get('status', 'unknown')}`")
-            lines.append(f"- failure_type: `{verification.get('failure_type', 'unknown')}`")
-            for note in verification.get("notes", [])[:5]:
-                lines.append(f"- note: {note}")
-        if isinstance(final_result, dict) and final_result and not final_result.get("success", True):
-            lines.append(f"- final_failure_type: `{final_result.get('failure_type', 'unknown')}`")
-        if len(lines) == 1:
-            lines.append("- 直近の失敗情報は見つかりませんでした。")
-        await self._send_interaction_text(interaction, "\n".join(lines), ephemeral=True)
+        await self._send_interaction_text(
+            interaction,
+            format_why_failed_message(
+                last_failure=last_failure,
+                verification=verification,
+                final_result=final_result,
+            ),
+            ephemeral=True,
+        )
 
     async def budget_command(self, interaction: discord.Interaction) -> None:
         thread_id = self._ensure_managed_thread(interaction.channel)
@@ -619,13 +586,15 @@ class DevBotClient(discord.Client):
             return
         final_result = self.state_store.load_artifact(thread_id, "final_result.json")
         verification = self.state_store.load_artifact(thread_id, "verification_summary.json")
-        lines = [
-            f"attempts: `{self.state_store.load_meta(thread_id).get('attempt_count', 0)}`",
-            f"verification_status: `{verification.get('status', 'unknown') if isinstance(verification, dict) else 'unknown'}`",
-        ]
-        if isinstance(final_result, dict) and final_result:
-            lines.append(f"success: `{final_result.get('success', False)}`")
-        await self._send_interaction_text(interaction, "\n".join(lines), ephemeral=True)
+        await self._send_interaction_text(
+            interaction,
+            format_budget_message(
+                attempt_count=int(self.state_store.load_meta(thread_id).get("attempt_count", 0)),
+                verification=verification,
+                final_result=final_result,
+            ),
+            ephemeral=True,
+        )
 
     async def repo_autocomplete(self, interaction: discord.Interaction, current: str) -> list[app_commands.Choice[str]]:
         del interaction
@@ -850,42 +819,15 @@ class DevBotClient(discord.Client):
         channel: discord.abc.GuildChannel | discord.Thread | None,
         repo_full_name: str,
     ) -> dict[str, Any]:
-        summary = self.state_store.load_artifact(thread_id, "requirement_summary.json")
-        plan = self.state_store.load_artifact(thread_id, "plan.json")
-        test_plan = self.state_store.load_artifact(thread_id, "test_plan.json")
-        if not isinstance(summary, dict) or not isinstance(plan, dict) or not isinstance(test_plan, dict) or not plan or not test_plan:
-            raise ValueError("先に `/plan repo:owner/repo` を実行してください。")
-
-        issue = self.state_store.load_artifact(thread_id, "issue.json")
-        if not isinstance(issue, dict) or not issue:
-            thread_url = channel.jump_url if isinstance(channel, discord.Thread) else ""
-            title = build_issue_title(summary)
-            body = build_issue_body(summary, thread_url)
-            try:
-                created = await asyncio.to_thread(
-                    self.github_client.create_issue,
-                    repo_full_name=repo_full_name,
-                    title=title,
-                    body=body,
-                )
-            except Exception as exc:
-                raise RuntimeError(f"Issue 作成に失敗しました: `{exc}`") from exc
-            issue = {
-                "repo_full_name": created.repo_full_name,
-                "number": created.number,
-                "title": created.title,
-                "body": created.body,
-                "url": created.url,
-            }
-            self.state_store.write_artifact(thread_id, "issue.json", issue)
-
-        workspace_key = self.state_store.bind_issue(thread_id, repo_full_name, int(issue["number"]))
-        started = await self.orchestrator.enqueue(
-            WorkItem(thread_id=thread_id, repo_full_name=repo_full_name, issue=issue, workspace_key=workspace_key)
+        thread_url = channel.jump_url if isinstance(channel, discord.Thread) else ""
+        return await ensure_issue_and_enqueue(
+            thread_id=thread_id,
+            repo_full_name=repo_full_name,
+            state_store=self.state_store,
+            github_client=self.github_client,
+            orchestrator=self.orchestrator,
+            thread_url=thread_url,
         )
-        if not started:
-            raise RuntimeError("パイプラインの起動に失敗しました。")
-        return issue
 
     def _build_plan_artifacts(self, repo: str, thread_id: int, summary: dict[str, Any]) -> dict[str, Any]:
         planning_workspace = self.pipeline.workspace_manager.prepare_plan_workspace(repo, thread_id)
@@ -945,28 +887,7 @@ class DevBotClient(discord.Client):
         )
 
     def _format_plan_message(self, repo: str, plan: dict[str, Any], test_plan: dict[str, Any]) -> str:
-        scope = "\n".join(f"- {item}" for item in plan.get("scope", [])[:6]) or "- なし"
-        steps = "\n".join(f"- {item}" for item in plan.get("implementation_steps", [])[:6]) or "- なし"
-        risks = "\n".join(f"- {item}" for item in plan.get("risks", [])[:4]) or "- なし"
-        test_cases = "\n".join(
-            f"- {case.get('id', 'TC')} {case.get('name', '')} [{case.get('category', '')}/{case.get('priority', '')}]"
-            for case in test_plan.get("cases", [])[:6]
-            if isinstance(case, dict)
-        ) or "- なし"
-        return (
-            "plan.json / test_plan.json を生成しました。\n"
-            f"- Repo: `{repo}`\n"
-            f"- Goal: {plan.get('goal', '(no goal)')}\n\n"
-            "Scope\n"
-            f"{scope}\n\n"
-            "Implementation steps\n"
-            f"{steps}\n\n"
-            "Test cases\n"
-            f"{test_cases}\n\n"
-            "Risks\n"
-            f"{risks}\n\n"
-            "続けて実装 run を開始します。"
-        )
+        return format_plan_message(repo, plan, test_plan)
 
     def _clear_execution_artifacts(self, thread_id: int) -> None:
         for filename in DERIVED_ARTIFACTS:
@@ -1107,4 +1028,6 @@ def _json_safe_value(value: Any) -> Any:
 
 
 def build_client(settings: Settings) -> DevBotClient:
+    if not DISCORD_AVAILABLE:
+        raise RuntimeError("discord.py is not installed")
     return DevBotClient(settings=settings, state_store=FileStateStore(runs_root=settings.runs_root))
