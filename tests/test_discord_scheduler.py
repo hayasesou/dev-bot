@@ -583,6 +583,57 @@ class DiscordSchedulerAsyncTests(unittest.IsolatedAsyncioTestCase):
         self.client.github_client.merge_pull_request.assert_not_called()
         self.client.github_client.update_issue_state.assert_called_with("owner/repo", 42, "Blocked")
 
+    async def test_scheduler_tick_keeps_merging_issue_when_pr_mergeability_is_unknown(self) -> None:
+        issue_key = "owner/repo#42"
+        self.state_store.create_issue_record(issue_key, thread_id=321, status="Merging")
+        self.state_store.update_issue_meta(
+            issue_key, github_repo="owner/repo", issue_number="42", plan_state="Approved"
+        )
+        self.state_store.write_artifact(
+            issue_key,
+            "issue.json",
+            {
+                "repo_full_name": "owner/repo",
+                "number": 42,
+                "title": "Ship scheduler",
+                "url": "https://github.com/owner/repo/issues/42",
+            },
+        )
+        self.state_store.write_artifact(
+            issue_key,
+            "pr.json",
+            {"number": 99, "url": "https://github.com/owner/repo/pull/99"},
+        )
+        self.client.github_client = MagicMock()
+        self.client.github_client.list_project_issues.return_value = [
+            {
+                "repo_full_name": "owner/repo",
+                "number": 42,
+                "title": "Ship scheduler",
+                "body": "body",
+                "url": "https://github.com/owner/repo/issues/42",
+                "issue_state": "OPEN",
+                "state": "Merging",
+                "plan": "Approved",
+            }
+        ]
+        self.client.github_client.get_pull_request_status.return_value = {
+            "draft": False,
+            "mergeable": True,
+            "mergeable_state": "unknown",
+            "head_sha": "headsha123",
+        }
+        self.client.github_client.merge_pull_request.return_value = {
+            "merged": False,
+            "message": "mergeability pending",
+            "sha": "",
+        }
+
+        await self.client._scheduler_tick()
+
+        self.assertEqual("Merging", self.state_store.load_issue_meta(issue_key)["status"])
+        self.client.github_client.update_issue_state.assert_not_called()
+
     async def test_restore_pending_runs_keeps_in_progress_issue_when_process_record_exists(self) -> None:
         issue_key = "owner/repo#42"
         self.state_store.create_issue_record(issue_key, thread_id=321, status="In Progress")
@@ -661,6 +712,34 @@ class DiscordSchedulerAsyncTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual("", meta["runtime_status"])
         self.assertEqual({}, self.client.process_registry.load(issue_key))
         self.client.github_client.update_issue_state.assert_called_with("owner/repo", 42, "Rework")
+
+    async def test_reconcile_keeps_in_progress_issue_when_legacy_thread_process_record_is_active(self) -> None:
+        issue_key = "owner/repo#42"
+        self.state_store.create_issue_record(issue_key, thread_id=321, status="In Progress")
+        self.state_store.update_issue_meta(
+            issue_key,
+            github_repo="owner/repo",
+            issue_number="42",
+            plan_state="Approved",
+            runtime_status="running",
+        )
+        original_is_active = self.client.process_registry.is_active
+
+        def is_active(identifier):
+            if identifier == issue_key:
+                return False
+            if identifier == 321:
+                return True
+            return original_is_active(identifier)
+
+        self.client.process_registry.is_active = is_active  # type: ignore[method-assign]
+        self.client.github_client = MagicMock()
+
+        self.client._reconcile_thread_runtime_state(321)
+
+        meta = self.state_store.load_issue_meta(issue_key)
+        self.assertEqual("In Progress", meta["status"])
+        self.client.github_client.update_issue_state.assert_not_called()
 
     async def test_restore_pending_runs_skips_ready_issue_when_plan_is_no_longer_approved(self) -> None:
         issue_key = "owner/repo#42"

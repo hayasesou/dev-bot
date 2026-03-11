@@ -1017,6 +1017,10 @@ class DevBotClient(discord.Client):
                 issue_key, thread_id, repo_full_name, issue_number, f"PR status lookup failed: {exc}"
             )
             return
+        mergeable_state = str(pr_status.get("mergeable_state", "")).strip().lower()
+        if mergeable_state == "unknown":
+            logger.info("merge pending: mergeability is still unknown for %s", issue_key)
+            return
         guard_failure = self._merge_guard_failure(pr, pr_status)
         if guard_failure:
             await self._mark_merging_blocked(issue_key, thread_id, repo_full_name, issue_number, guard_failure)
@@ -1460,7 +1464,9 @@ class DevBotClient(discord.Client):
             "awaiting_high_risk_approval",
         }:
             return
-        has_process = self.process_registry.is_active(runtime_key)
+        has_process = self.process_registry.is_active(runtime_key) or (
+            thread_id > 0 and isinstance(runtime_key, str) and self.process_registry.is_active(thread_id)
+        )
         is_active = (
             (thread_id > 0 and self.orchestrator.is_running(thread_id))
             or (thread_id > 0 and self.orchestrator.is_queued(thread_id))
