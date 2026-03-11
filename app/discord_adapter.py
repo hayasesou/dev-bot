@@ -430,6 +430,17 @@ class DevBotClient(discord.Client):
     def _chunk_message(self, content: str) -> list[str]:
         return chunk_message(content, max_length=MAX_DISCORD_MESSAGE_LENGTH)
 
+    async def _update_bound_issue_state(self, thread_id: int, state: str) -> None:
+        issue_key = self.state_store.issue_key_for_thread(thread_id)
+        if not issue_key:
+            return
+        meta = self.state_store.load_issue_meta(issue_key)
+        repo_full_name = str(meta.get("github_repo", "")).strip()
+        issue_number = int(str(meta.get("issue_number", "0")).strip() or 0)
+        if not repo_full_name or issue_number <= 0:
+            return
+        await self._run_blocking(self.github_client.update_issue_state, repo_full_name, issue_number, state)
+
     async def plan_command(self, interaction: discord.Interaction, repo: str) -> None:
         await self._generate_plan(interaction, repo, alias_used=False)
 
@@ -1331,7 +1342,18 @@ class DevBotClient(discord.Client):
                 github_repo=repo_full_name,
                 issue_number=str(issue["number"]),
             )
-            await self._scheduler_tick()
+            if str(getattr(self.settings, "github_project_id", "")).strip():
+                await self._scheduler_tick()
+            else:
+                started = await enqueue_issue_run(
+                    thread_id=thread_id,
+                    repo_full_name=repo_full_name,
+                    issue=issue,
+                    issue_key=issue_key,
+                    orchestrator=self.orchestrator,
+                )
+                if not started:
+                    raise RuntimeError("パイプラインの起動に失敗しました。")
         except (RuntimeError, ValueError) as exc:
             if promoted_issue_key or self.state_store.issue_key_for_thread(thread_id):
                 self.state_store.update_draft_meta(thread_id, status="promotion_failed")
@@ -1569,8 +1591,13 @@ class DevBotClient(discord.Client):
             self.state_store.update_meta(runtime_key, runtime_status="running")
             await interaction.response.send_message("高リスク操作を承認しました。run を再開します。", ephemeral=True)
             return
-        self.state_store.update_meta(self._runtime_key(thread_id), runtime_status="")
-        self.state_store.update_status(self._runtime_key(thread_id), "Blocked")
+        runtime_key = self._runtime_key(thread_id)
+        self.state_store.update_meta(runtime_key, runtime_status="")
+        self.state_store.update_status(runtime_key, "Blocked")
+        try:
+            await self._update_bound_issue_state(thread_id, "Blocked")
+        except Exception as exc:
+            logger.warning("reject approval: failed to update project state for thread %s: %s", thread_id, exc)
         await interaction.response.send_message("高リスク操作を拒否しました。run を停止します。", ephemeral=True)
 
     async def _maybe_post_pending_approval(self, thread: discord.Thread) -> None:

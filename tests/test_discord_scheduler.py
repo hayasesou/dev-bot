@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import tempfile
 import unittest
-from unittest.mock import MagicMock
+from unittest.mock import AsyncMock, MagicMock
 
 from app import run_request
 from app.discord_adapter import DevBotClient
@@ -116,12 +116,16 @@ class _FakeMessage:
 class _FakeResponse:
     def __init__(self) -> None:
         self.messages: list[tuple[str, bool]] = []
+        self.deferred: list[bool] = []
 
     def is_done(self) -> bool:
         return False
 
     async def send_message(self, content: str, ephemeral: bool = False) -> None:
         self.messages.append((content, ephemeral))
+
+    async def defer(self, thinking: bool = False) -> None:
+        self.deferred.append(thinking)
 
 
 class _FakeInteraction:
@@ -756,3 +760,53 @@ class DiscordSchedulerAsyncTests(unittest.IsolatedAsyncioTestCase):
         await self.client._promote_approved_plan(interaction)
 
         self.client.github_client.add_issue_to_project.assert_called_with("owner/repo", 42)
+
+    async def test_promote_approved_plan_enqueues_directly_when_project_is_unconfigured(self) -> None:
+        thread_id = 321
+        self.state_store.create_run(thread_id=thread_id, parent_message_id=1, channel_id=2)
+        self.state_store.write_artifact(thread_id, "requirement_summary.json", {"goal": "ship"})
+        self.state_store.write_artifact(thread_id, "plan.json", {"steps": ["one"]})
+        self.state_store.write_artifact(thread_id, "test_plan.json", {"checks": ["tests"]})
+        self.state_store.update_draft_meta(thread_id, github_repo="owner/repo")
+        self.client.github_client = MagicMock()
+        self.client.github_client.create_issue.return_value = MagicMock(
+            repo_full_name="owner/repo",
+            number=42,
+            title="Ship scheduler",
+            body="body",
+            url="https://github.com/owner/repo/issues/42",
+        )
+        interaction = _FakeInteraction(_FakeThread(thread_id))
+        self.client._ensure_managed_thread = lambda channel: thread_id  # type: ignore[method-assign]
+        sent: list[str] = []
+
+        async def _send_followup_text(_interaction, content: str, *, ephemeral: bool = False) -> None:
+            del _interaction, ephemeral
+            sent.append(content)
+
+        self.client._send_followup_text = _send_followup_text  # type: ignore[method-assign]
+        enqueue_mock = AsyncMock(return_value=True)
+        self.client.orchestrator.enqueue = enqueue_mock  # type: ignore[method-assign]
+
+        await self.client._promote_approved_plan(interaction)
+
+        enqueue_mock.assert_called_once()
+        self.assertIn("queue", sent[0])
+
+    async def test_reject_high_risk_approval_updates_bound_issue_state(self) -> None:
+        thread_id = 321
+        issue_key = "owner/repo#42"
+        self.state_store.create_run(thread_id=thread_id, parent_message_id=1, channel_id=2)
+        self.state_store.bind_issue(thread_id, "owner/repo", 42)
+        self.state_store.update_issue_meta(issue_key, github_repo="owner/repo", issue_number="42")
+        self.client.github_client = MagicMock()
+        self.client.approval_coordinator.create_request(thread_id, "run-1", "rm -rf", "rm -rf tmp", "dangerous")
+        interaction = MagicMock()
+        interaction.channel = _FakeThread(thread_id)
+        interaction.response = _FakeResponse()
+        interaction.user = "reviewer"
+        self.client._ensure_managed_thread = lambda channel: thread_id  # type: ignore[method-assign]
+
+        await self.client._resolve_approval(interaction, approved=False)
+
+        self.client.github_client.update_issue_state.assert_called_with("owner/repo", 42, "Blocked")

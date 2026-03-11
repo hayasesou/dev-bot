@@ -5,6 +5,7 @@ import json
 import subprocess
 from dataclasses import dataclass
 from datetime import UTC, datetime
+from functools import partial
 from pathlib import Path
 from typing import Any, Protocol
 
@@ -62,12 +63,22 @@ class DevelopmentPipeline:
             max_buffer_size=settings.claude_agent_max_buffer_size,
         )
 
+    async def _run_blocking(self, func: Any, /, *args: Any, **kwargs: Any) -> Any:
+        bound = partial(func, *args, **kwargs)
+        return await asyncio.to_thread(bound)
+
     async def abort(self, thread_id: int) -> bool:
         issue_key = self.state_store.issue_key_for_thread(thread_id)
         target = issue_key or thread_id
-        stopped = await asyncio.to_thread(self.process_registry.terminate, target)
+        stopped = await self._run_blocking(self.process_registry.terminate, target)
         self.state_store.update_meta(target, runtime_status="")
         self.state_store.update_status(target, "Blocked")
+        if issue_key:
+            meta = self.state_store.load_issue_meta(issue_key)
+            repo_full_name = str(meta.get("github_repo", "")).strip()
+            issue_number = int(str(meta.get("issue_number", "0")).strip() or 0)
+            if repo_full_name and issue_number > 0:
+                await self._run_blocking(self.github_client.update_issue_state, repo_full_name, issue_number, "Blocked")
         return stopped
 
     async def execute_run(
