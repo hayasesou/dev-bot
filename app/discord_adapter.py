@@ -998,7 +998,7 @@ class DevBotClient(discord.Client):
         repo_full_name: str,
         issue_number: int,
     ) -> None:
-        if self.process_registry.load(issue_key):
+        if self.process_registry.is_active(issue_key):
             return
         pr = self.state_store.load_artifact(issue_key, "pr.json")
         if not isinstance(pr, dict) or not pr or not pr.get("number"):
@@ -1460,7 +1460,7 @@ class DevBotClient(discord.Client):
             "awaiting_high_risk_approval",
         }:
             return
-        has_process = bool(self.process_registry.load(runtime_key))
+        has_process = self.process_registry.is_active(runtime_key)
         is_active = (
             (thread_id > 0 and self.orchestrator.is_running(thread_id))
             or (thread_id > 0 and self.orchestrator.is_queued(thread_id))

@@ -640,6 +640,28 @@ class DiscordSchedulerAsyncTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual("Rework", meta["status"])
         self.client.github_client.update_issue_state.assert_called_with("owner/repo", 42, "Rework")
 
+    async def test_reconcile_marks_in_progress_issue_rework_when_process_record_is_stale(self) -> None:
+        issue_key = "owner/repo#42"
+        self.state_store.create_issue_record(issue_key, thread_id=321, status="In Progress")
+        self.state_store.update_issue_meta(
+            issue_key,
+            github_repo="owner/repo",
+            issue_number="42",
+            plan_state="Approved",
+            runtime_status="running",
+        )
+        self.client.process_registry.register(issue_key, "run-1", pid=999999, runner_type="codex")
+        self.client.github_client = MagicMock()
+        self.client.github_client.update_issue_state.return_value = None
+
+        self.client._reconcile_thread_runtime_state(321)
+
+        meta = self.state_store.load_issue_meta(issue_key)
+        self.assertEqual("Rework", meta["status"])
+        self.assertEqual("", meta["runtime_status"])
+        self.assertEqual({}, self.client.process_registry.load(issue_key))
+        self.client.github_client.update_issue_state.assert_called_with("owner/repo", 42, "Rework")
+
     async def test_restore_pending_runs_skips_ready_issue_when_plan_is_no_longer_approved(self) -> None:
         issue_key = "owner/repo#42"
         self.client.settings.github_project_id = "project-1"
