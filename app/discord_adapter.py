@@ -1458,8 +1458,10 @@ class DevBotClient(discord.Client):
     def _clear_execution_artifacts(self, thread_id: int) -> None:
         runtime_key = self._runtime_key(thread_id)
         issue_bound = runtime_key != thread_id
-        runtime_artifacts = DERIVED_ARTIFACTS if not issue_bound else tuple(
-            filename for filename in DERIVED_ARTIFACTS if filename != "issue.json"
+        runtime_artifacts = (
+            DERIVED_ARTIFACTS
+            if not issue_bound
+            else tuple(filename for filename in DERIVED_ARTIFACTS if filename != "issue.json")
         )
         for filename in runtime_artifacts:
             self.state_store.delete_artifact(runtime_key, filename)
