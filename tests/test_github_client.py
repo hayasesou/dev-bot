@@ -162,6 +162,31 @@ class GitHubIssueClientTests(unittest.TestCase):
 
         self.assertEqual({"state": "Ready", "plan": "Approved"}, fields)
 
+    def test_get_issue_project_fields_queries_with_expanded_field_limits(self) -> None:
+        client = GitHubIssueClient(
+            "token",
+            project_id="project-1",
+            project_state_field_id="field-state",
+            project_plan_field_id="field-plan",
+        )
+        repo = Mock()
+        issue = Mock(node_id="issue-node")
+        repo.get_issue.return_value = issue
+
+        with (
+            patch.object(client, "_get_repo", return_value=repo),
+            patch.object(
+                client,
+                "_graphql",
+                return_value={"node": {"projectItems": {"nodes": []}}},
+            ) as graphql_mock,
+        ):
+            client.get_issue_project_fields("owner/repo", 42)
+
+        query_text = graphql_mock.call_args.args[0]
+        self.assertIn("projectItems(first:50)", query_text)
+        self.assertIn("fieldValues(first:100)", query_text)
+
     def test_preflight_loads_project_configuration_when_project_is_configured(self) -> None:
         client = GitHubIssueClient(
             "token",
@@ -302,6 +327,23 @@ class GitHubIssueClientTests(unittest.TestCase):
             ],
             items,
         )
+
+    def test_list_project_issues_queries_with_expanded_field_limits(self) -> None:
+        client = GitHubIssueClient(
+            "token",
+            project_id="project-1",
+            project_state_field_id="field-state",
+            project_plan_field_id="field-plan",
+        )
+        with patch.object(
+            client,
+            "_graphql",
+            return_value={"node": {"items": {"pageInfo": {"hasNextPage": False, "endCursor": None}, "nodes": []}}},
+        ) as graphql_mock:
+            client.list_project_issues()
+
+        query_text = graphql_mock.call_args.args[0]
+        self.assertIn("fieldValues(first:100)", query_text)
 
     def test_merge_pull_request_returns_merge_result(self) -> None:
         client = GitHubIssueClient("token")

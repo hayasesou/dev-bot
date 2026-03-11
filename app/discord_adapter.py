@@ -725,6 +725,7 @@ class DevBotClient(discord.Client):
         if not project_issues:
             return self.state_store.list_issue_records()
 
+        synced_issue_keys: list[str] = []
         for project_issue in project_issues:
             repo_full_name = str(project_issue.get("repo_full_name", "")).strip()
             issue_number = int(project_issue.get("number", 0) or 0)
@@ -733,6 +734,7 @@ class DevBotClient(discord.Client):
             if not repo_full_name or issue_number <= 0:
                 continue
             issue_key = f"{repo_full_name}#{issue_number}"
+            synced_issue_keys.append(issue_key)
             issue_meta = self.state_store.load_issue_meta(issue_key)
             if not issue_meta:
                 self.state_store.create_issue_record(
@@ -758,7 +760,7 @@ class DevBotClient(discord.Client):
                     "state": str(project_issue.get("issue_state", "") or ""),
                 },
             )
-        return self.state_store.list_issue_records()
+        return [self.state_store.load_issue_meta(issue_key) for issue_key in synced_issue_keys]
 
     async def _dispatch_issue_if_ready(
         self,
@@ -1397,7 +1399,7 @@ class DevBotClient(discord.Client):
         meta = self.state_store.load_meta(runtime_key)
         state = str(meta.get("status", "")).strip()
         runtime_status = str(meta.get("runtime_status", "")).strip()
-        if state not in {"In Progress", "Merging"} and runtime_status not in {
+        if state not in {"In Progress"} and runtime_status not in {
             "queued",
             "running",
             "verifying",
@@ -1412,7 +1414,7 @@ class DevBotClient(discord.Client):
                 return
         if is_active:
             return
-        next_state = "Blocked" if state == "Merging" else "Rework"
+        next_state = "Rework"
         self.state_store.update_meta(runtime_key, runtime_status="")
         self.state_store.update_status(runtime_key, next_state)
         if isinstance(runtime_key, str):

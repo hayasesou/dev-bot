@@ -180,7 +180,7 @@ class GitHubIssueClient:
                           repository { nameWithOwner }
                         }
                       }
-                      fieldValues(first:20) {
+                      fieldValues(first:100) {
                         nodes {
                           ... on ProjectV2ItemFieldSingleSelectValue {
                             name
@@ -424,10 +424,10 @@ class GitHubIssueClient:
         query($issueId:ID!) {
           node(id:$issueId) {
             ... on Issue {
-              projectItems(first:20) {
+              projectItems(first:50) {
                 nodes {
                   project { id }
-                  fieldValues(first:20) {
+                  fieldValues(first:100) {
                     nodes {
                       ... on ProjectV2ItemFieldSingleSelectValue {
                         name

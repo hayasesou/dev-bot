@@ -43,6 +43,26 @@ class DiscordSchedulerTests(unittest.TestCase):
         issue = self.state_store.load_artifact("owner/repo#42", "issue.json")
         self.assertEqual("Ship scheduler", issue["title"])
 
+    def test_sync_project_board_state_returns_only_project_items_when_sync_succeeds(self) -> None:
+        self.state_store.create_issue_record("owner/repo#7", status="Ready")
+        self.client.github_client = MagicMock()
+        self.client.github_client.list_project_issues.return_value = [
+            {
+                "repo_full_name": "owner/repo",
+                "number": 42,
+                "title": "Ship scheduler",
+                "body": "body",
+                "url": "https://github.com/owner/repo/issues/42",
+                "issue_state": "OPEN",
+                "state": "Ready",
+                "plan": "Approved",
+            }
+        ]
+
+        metas = self.client._sync_project_board_state()
+
+        self.assertEqual(["owner/repo#42"], [meta["issue_key"] for meta in metas])
+
     def test_clear_execution_artifacts_keeps_issue_number_for_issue_bound_thread(self) -> None:
         self.state_store.create_run(thread_id=1, parent_message_id=10, channel_id=20)
         self.state_store.bind_issue(1, "owner/repo", 42)
@@ -170,6 +190,22 @@ class DiscordSchedulerAsyncTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual("Done", self.state_store.load_issue_meta(issue_key)["status"])
         self.assertTrue(any("merge" in message for message in thread.messages))
+
+    async def test_reconcile_does_not_block_merging_issue_without_runtime_process(self) -> None:
+        issue_key = "owner/repo#42"
+        self.state_store.create_issue_record(issue_key, thread_id=321, status="Merging")
+        self.state_store.update_issue_meta(
+            issue_key,
+            github_repo="owner/repo",
+            issue_number="42",
+            plan_state="Approved",
+            runtime_status="",
+        )
+
+        self.client._reconcile_thread_runtime_state(321)
+
+        meta = self.state_store.load_issue_meta(issue_key)
+        self.assertEqual("Merging", meta["status"])
 
     async def test_scheduler_tick_blocks_merging_issue_without_pr(self) -> None:
         issue_key = "owner/repo#42"
