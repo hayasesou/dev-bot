@@ -241,8 +241,10 @@ class DiscordSchedulerAsyncTests(unittest.IsolatedAsyncioTestCase):
         await self.client.revise_command(interaction)
 
         issue_meta = self.state_store.load_issue_meta("owner/repo#42")
+        draft_meta = self.state_store.load_draft_meta(321)
         self.assertEqual("42", issue_meta["issue_number"])
-        self.assertEqual("requirements_dialogue", issue_meta["status"])
+        self.assertEqual("Human Review", issue_meta["status"])
+        self.assertEqual("requirements_dialogue", draft_meta["status"])
         self.assertEqual("", issue_meta["pr_number"])
         self.assertEqual(42, self.state_store.load_artifact("owner/repo#42", "issue.json")["number"])
         self.assertEqual({}, self.state_store.load_artifact("owner/repo#42", "plan.json"))
@@ -250,6 +252,44 @@ class DiscordSchedulerAsyncTests(unittest.IsolatedAsyncioTestCase):
             [("要件整理を再開しました。修正内容を投稿してください。", True)],
             interaction.response.messages,
         )
+
+    async def test_handle_thread_message_keeps_issue_state_when_bound_thread_enters_requirements_dialogue(self) -> None:
+        thread_id = 321
+        issue_key = "owner/repo#42"
+        self.state_store.create_run(thread_id=thread_id, parent_message_id=10, channel_id=20)
+        self.state_store.bind_issue(thread_id, "owner/repo", 42)
+        self.state_store.update_issue_meta(
+            issue_key,
+            status="Human Review",
+            issue_number="42",
+            github_repo="owner/repo",
+        )
+
+        async def _parse_message_inputs(_message):
+            return {"error": None}
+
+        async def _materialize_message_payload(_thread_id, _message, _parsed):
+            del _message, _parsed
+            return "follow-up question"
+
+        async def _send_channel_text(_channel, _content):
+            del _channel, _content
+            return None
+
+        self.client._parse_message_inputs = _parse_message_inputs  # type: ignore[method-assign]
+        self.client._materialize_message_payload = _materialize_message_payload  # type: ignore[method-assign]
+        self.client._send_channel_text = _send_channel_text  # type: ignore[method-assign]
+        self.client.requirements_agent = MagicMock()
+        self.client.requirements_agent.build_reply.return_value = MagicMock(
+            body="Need one clarification",
+            status="requirements_dialogue",
+            artifacts={},
+        )
+
+        await self.client._handle_thread_message(_FakeMessage(_FakeThread(thread_id)))
+
+        self.assertEqual("Human Review", self.state_store.load_issue_meta(issue_key)["status"])
+        self.assertEqual("requirements_dialogue", self.state_store.load_draft_meta(thread_id)["status"])
 
     async def test_handle_thread_message_blocks_when_in_progress_process_exists_without_runtime_status(self) -> None:
         thread_id = 321

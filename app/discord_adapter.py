@@ -348,7 +348,11 @@ class DevBotClient(discord.Client):
         reply = await self._run_blocking(self.requirements_agent.build_reply, thread_id)
         await self._send_channel_text(message.channel, reply.body)
         self.state_store.append_message(thread_id, "assistant", reply.body)
-        self.state_store.update_status(thread_id, reply.status)
+        issue_key = self.state_store.issue_key_for_thread(thread_id)
+        if issue_key and reply.status in {"requirements_dialogue", "ready_for_confirmation", "requirements_error"}:
+            self.state_store.update_draft_meta(thread_id, status=reply.status)
+        else:
+            self.state_store.update_status(thread_id, reply.status)
         if reply.artifacts:
             self._persist_artifacts(thread_id, reply.artifacts)
 
@@ -591,16 +595,25 @@ class DevBotClient(discord.Client):
             return
         self._clear_execution_artifacts(thread_id)
         runtime_key = self._runtime_key(thread_id)
-        fields: dict[str, Any] = {
-            "status": "requirements_dialogue",
-            "pr_number": "",
-            "pr_url": "",
-            "workspace": "",
-            "branch_name": "",
-            "base_branch": "",
-        }
         if runtime_key == thread_id:
+            fields: dict[str, Any] = {
+                "status": "requirements_dialogue",
+                "pr_number": "",
+                "pr_url": "",
+                "workspace": "",
+                "branch_name": "",
+                "base_branch": "",
+            }
             fields["issue_number"] = ""
+        else:
+            self.state_store.update_draft_meta(thread_id, status="requirements_dialogue")
+            fields = {
+                "pr_number": "",
+                "pr_url": "",
+                "workspace": "",
+                "branch_name": "",
+                "base_branch": "",
+            }
         self.state_store.update_meta(runtime_key, **fields)
         await interaction.response.send_message("要件整理を再開しました。修正内容を投稿してください。", ephemeral=True)
 
