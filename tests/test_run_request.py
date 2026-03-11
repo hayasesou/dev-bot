@@ -53,6 +53,7 @@ class RunRequestTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(12, issue["number"])
         self.assertEqual("owner/repo#12", self.state_store.load_meta(100)["issue_key"])
         self.assertEqual("owner/repo#12", orchestrator.items[0].workspace_key)
+        self.assertEqual("owner/repo#12", orchestrator.items[0].issue_key)
 
     async def test_reuses_bound_issue_without_creating_a_new_one(self) -> None:
         self.state_store.write_artifact(
@@ -79,6 +80,7 @@ class RunRequestTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(12, issue["number"])
         self.assertEqual("owner/repo#12", orchestrator.items[0].workspace_key)
+        self.assertEqual("owner/repo#12", orchestrator.items[0].issue_key)
         self.assertEqual("owner/repo#12", self.state_store.load_meta(100)["issue_key"])
 
     async def test_raises_when_enqueue_is_rejected(self) -> None:

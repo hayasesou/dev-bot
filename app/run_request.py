@@ -17,6 +17,34 @@ async def ensure_issue_and_enqueue(
     orchestrator: Orchestrator,
     thread_url: str = "",
 ) -> dict[str, Any]:
+    issue = await ensure_issue_for_thread(
+        thread_id=thread_id,
+        repo_full_name=repo_full_name,
+        state_store=state_store,
+        github_client=github_client,
+        thread_url=thread_url,
+    )
+    workspace_key = state_store.bind_issue(thread_id, repo_full_name, int(issue["number"]))
+    started = await enqueue_issue_run(
+        thread_id=thread_id,
+        repo_full_name=repo_full_name,
+        issue=issue,
+        issue_key=workspace_key,
+        orchestrator=orchestrator,
+    )
+    if not started:
+        raise RuntimeError("パイプラインの起動に失敗しました。")
+    return issue
+
+
+async def ensure_issue_for_thread(
+    *,
+    thread_id: int,
+    repo_full_name: str,
+    state_store: FileStateStore,
+    github_client: Any,
+    thread_url: str = "",
+) -> dict[str, Any]:
     summary = state_store.load_artifact(thread_id, "requirement_summary.json")
     plan = state_store.load_artifact(thread_id, "plan.json")
     test_plan = state_store.load_artifact(thread_id, "test_plan.json")
@@ -50,11 +78,24 @@ async def ensure_issue_and_enqueue(
             "url": created.url,
         }
         state_store.write_artifact(thread_id, "issue.json", issue)
-
-    workspace_key = state_store.bind_issue(thread_id, repo_full_name, int(issue["number"]))
-    started = await orchestrator.enqueue(
-        WorkItem(thread_id=thread_id, repo_full_name=repo_full_name, issue=issue, workspace_key=workspace_key)
-    )
-    if not started:
-        raise RuntimeError("パイプラインの起動に失敗しました。")
     return issue
+
+ 
+async def enqueue_issue_run(
+    *,
+    thread_id: int,
+    repo_full_name: str,
+    issue: dict[str, Any],
+    issue_key: str,
+    orchestrator: Orchestrator,
+) -> bool:
+    started = await orchestrator.enqueue(
+        WorkItem(
+            thread_id=thread_id,
+            repo_full_name=repo_full_name,
+            issue=issue,
+            issue_key=issue_key,
+            workspace_key=issue_key,
+        )
+    )
+    return started
