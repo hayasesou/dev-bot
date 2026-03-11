@@ -43,9 +43,13 @@ class ProcessRegistry:
             path.unlink()
 
     def load(self, issue_key: str | int) -> dict[str, object]:
-        path = self._record_path(str(issue_key))
+        key = str(issue_key)
+        path = self._record_path(key)
         if not path.exists():
-            return {}
+            legacy = self._legacy_record_path(key)
+            if not legacy.exists():
+                return {}
+            return json.loads(legacy.read_text(encoding="utf-8"))
         return json.loads(path.read_text(encoding="utf-8"))
 
     def terminate(self, issue_key: str | int) -> bool:
@@ -67,3 +71,6 @@ class ProcessRegistry:
     def _record_path(self, issue_key: str) -> Path:
         safe_key = issue_key.replace("/", "__").replace("#", "__")
         return self.root / f"{safe_key}.json"
+
+    def _legacy_record_path(self, issue_key: str) -> Path:
+        return self.root.parent / issue_key / "process.json"

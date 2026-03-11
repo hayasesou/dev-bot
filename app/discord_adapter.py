@@ -1281,6 +1281,7 @@ class DevBotClient(discord.Client):
             return
 
         await interaction.response.defer(thinking=True)
+        promoted_issue_key = ""
         try:
             issue = await ensure_issue_for_thread(
                 thread_id=thread_id,
@@ -1290,6 +1291,7 @@ class DevBotClient(discord.Client):
                 thread_url=interaction.channel.jump_url if isinstance(interaction.channel, discord.Thread) else "",
             )
             issue_key = self.state_store.bind_issue(thread_id, repo_full_name, int(issue["number"]))
+            promoted_issue_key = issue_key
             await asyncio.to_thread(
                 self.github_client.update_issue_plan, repo_full_name, int(issue["number"]), "Approved"
             )
@@ -1306,7 +1308,7 @@ class DevBotClient(discord.Client):
             )
             await self._scheduler_tick()
         except (RuntimeError, ValueError) as exc:
-            if isinstance(issue, dict) and issue:
+            if promoted_issue_key or self.state_store.issue_key_for_thread(thread_id):
                 self.state_store.update_draft_meta(thread_id, status="promotion_failed")
             await self._send_followup_text(interaction, str(exc), ephemeral=True)
             return
@@ -1438,6 +1440,25 @@ class DevBotClient(discord.Client):
             if runtime_key != thread_id:
                 self.state_store.delete_artifact(runtime_key, filename)
             self.state_store.delete_artifact(thread_id, filename)
+        if runtime_key != thread_id:
+            self.state_store.update_meta(
+                runtime_key,
+                pr_number="",
+                pr_url="",
+                workspace="",
+                branch_name="",
+                base_branch="",
+            )
+            self.state_store.update_draft_meta(
+                thread_id,
+                issue_number="",
+                pr_number="",
+                pr_url="",
+                workspace="",
+                branch_name="",
+                base_branch="",
+            )
+            return
         self.state_store.update_meta(
             runtime_key,
             issue_number="",

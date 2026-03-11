@@ -344,7 +344,12 @@ class FileStateStore:
         return json.loads(path.read_text(encoding="utf-8"))
 
     def update_draft_meta(self, thread_id: int | str, **fields: object) -> None:
-        self.update_meta(str(thread_id), **fields)
+        meta_path = self.draft_dir(thread_id) / "meta.json"
+        if not meta_path.exists():
+            return
+        meta = json.loads(meta_path.read_text(encoding="utf-8"))
+        meta.update(fields)
+        self._write_json(meta_path, meta)
 
     def update_issue_meta(self, issue_key: str, **fields: object) -> None:
         self.update_meta(issue_key, **fields)

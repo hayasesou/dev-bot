@@ -43,6 +43,26 @@ class DiscordSchedulerTests(unittest.TestCase):
         issue = self.state_store.load_artifact("owner/repo#42", "issue.json")
         self.assertEqual("Ship scheduler", issue["title"])
 
+    def test_clear_execution_artifacts_keeps_issue_number_for_issue_bound_thread(self) -> None:
+        self.state_store.create_run(thread_id=1, parent_message_id=10, channel_id=20)
+        self.state_store.bind_issue(1, "owner/repo", 42)
+        self.state_store.update_issue_meta(
+            "owner/repo#42",
+            issue_number="42",
+            pr_number="99",
+            pr_url="https://github.com/owner/repo/pull/99",
+            workspace="/tmp/work",
+            branch_name="agent/gh-42-test",
+            base_branch="main",
+        )
+
+        self.client._clear_execution_artifacts(1)
+
+        issue_meta = self.state_store.load_issue_meta("owner/repo#42")
+        self.assertEqual("42", issue_meta["issue_number"])
+        self.assertEqual("", issue_meta["pr_number"])
+        self.assertEqual("", issue_meta["workspace"])
+
 
 class _FakeThread:
     def __init__(self, thread_id: int) -> None:
@@ -340,3 +360,54 @@ class DiscordSchedulerAsyncTests(unittest.IsolatedAsyncioTestCase):
         meta = self.state_store.load_issue_meta(issue_key)
         self.assertEqual("Rework", meta["status"])
         self.client.github_client.update_issue_state.assert_called_with("owner/repo", 42, "Rework")
+
+    async def test_promote_approved_plan_marks_promotion_failed_when_issue_binding_exists(self) -> None:
+        thread_id = 321
+        self.state_store.create_run(thread_id=thread_id, parent_message_id=1, channel_id=2)
+        self.state_store.write_artifact(thread_id, "requirement_summary.json", {"goal": "ship"})
+        self.state_store.write_artifact(thread_id, "plan.json", {"steps": ["one"]})
+        self.state_store.write_artifact(thread_id, "test_plan.json", {"checks": ["tests"]})
+        self.state_store.bind_issue(thread_id, "owner/repo", 42)
+        self.state_store.write_artifact(
+            "owner/repo#42",
+            "issue.json",
+            {
+                "repo_full_name": "owner/repo",
+                "number": 42,
+                "title": "Ship scheduler",
+                "body": "body",
+                "url": "https://github.com/owner/repo/issues/42",
+            },
+        )
+        self.client.github_client = MagicMock()
+        self.client.github_client.update_issue_plan.side_effect = RuntimeError("plan update failed")
+
+        class _Resp:
+            async def defer(self, thinking: bool = False) -> None:
+                del thinking
+
+            async def send_message(self, content: str, *, ephemeral: bool = False) -> None:
+                del content, ephemeral
+
+        class _Chan(_FakeThread):
+            jump_url = "https://discord.test/thread/321"
+
+            def __init__(self, channel_id: int) -> None:
+                super().__init__(channel_id)
+
+        interaction = MagicMock()
+        interaction.channel = _Chan(thread_id)
+        interaction.response = _Resp()
+        sent: list[str] = []
+        self.client._ensure_managed_thread = lambda channel: thread_id  # type: ignore[method-assign]
+
+        async def _send_followup_text(_interaction, content: str, *, ephemeral: bool = False) -> None:
+            del _interaction, ephemeral
+            sent.append(content)
+
+        self.client._send_followup_text = _send_followup_text  # type: ignore[method-assign]
+
+        await self.client._promote_approved_plan(interaction)
+
+        self.assertEqual("promotion_failed", self.state_store.load_draft_meta(thread_id)["status"])
+        self.assertTrue(sent)
