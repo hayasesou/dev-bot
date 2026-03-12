@@ -455,14 +455,7 @@ class RequirementsAgent:
                 "pros": self._as_string_list(item.get("pros")),
                 "cons": self._as_string_list(item.get("cons")),
             }
-            if any(
-                (
-                    entry["name"],
-                    entry["summary"],
-                    entry["pros"],
-                    entry["cons"],
-                )
-            ):
+            if any((entry["name"], entry["summary"], entry["pros"], entry["cons"])):
                 normalized.append(entry)
         return normalized
 
