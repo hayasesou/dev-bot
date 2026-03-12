@@ -385,10 +385,17 @@ class DevBotClient(discord.Client):
             if isinstance(payload, dict):
                 self.state_store.write_artifact(thread_id, filename, payload)
 
+    @staticmethod
+    def _artifact_dict(payload: object) -> dict[str, Any]:
+        return payload if isinstance(payload, dict) else {}
+
     def _ensure_managed_thread(self, channel: discord.abc.GuildChannel | discord.Thread | None) -> int | None:
         if not isinstance(channel, discord.Thread):
             return None
-        return channel.id if self.state_store.has_run(channel.id) else None
+        thread_id = getattr(channel, "id", None)
+        if not isinstance(thread_id, int):
+            return None
+        return thread_id if self.state_store.has_run(thread_id) else None
 
     def _runtime_key(self, thread_id: int) -> str | int:
         return self.state_store.issue_key_for_thread(thread_id) or thread_id
@@ -525,16 +532,16 @@ class DevBotClient(discord.Client):
         self._reconcile_thread_runtime_state(thread_id)
         runtime_key = self._runtime_key(thread_id)
         meta = self._load_thread_ui_meta(thread_id)
-        issue = self.state_store.load_artifact(runtime_key, "issue.json")
-        pr = self.state_store.load_artifact(runtime_key, "pr.json")
-        summary = self.state_store.load_artifact(thread_id, "requirement_summary.json")
-        plan = self.state_store.load_artifact(thread_id, "plan.json")
-        test_plan = self.state_store.load_artifact(thread_id, "test_plan.json")
-        verification = self.state_store.load_artifact(runtime_key, "verification_summary.json")
-        review = self.state_store.load_artifact(runtime_key, "review_summary.json")
-        pending_approval = self.state_store.load_artifact(runtime_key, "pending_approval.json")
-        planning_progress = self.state_store.load_artifact(thread_id, "planning_progress.json")
-        current_activity = self.state_store.load_artifact(runtime_key, "current_activity.json")
+        issue = self._artifact_dict(self.state_store.load_artifact(runtime_key, "issue.json"))
+        pr = self._artifact_dict(self.state_store.load_artifact(runtime_key, "pr.json"))
+        summary = self._artifact_dict(self.state_store.load_artifact(thread_id, "requirement_summary.json"))
+        plan = self._artifact_dict(self.state_store.load_artifact(thread_id, "plan.json"))
+        test_plan = self._artifact_dict(self.state_store.load_artifact(thread_id, "test_plan.json"))
+        verification = self._artifact_dict(self.state_store.load_artifact(runtime_key, "verification_summary.json"))
+        review = self._artifact_dict(self.state_store.load_artifact(runtime_key, "review_summary.json"))
+        pending_approval = self._artifact_dict(self.state_store.load_artifact(runtime_key, "pending_approval.json"))
+        planning_progress = self._artifact_dict(self.state_store.load_artifact(thread_id, "planning_progress.json"))
+        current_activity = self._artifact_dict(self.state_store.load_artifact(runtime_key, "current_activity.json"))
         process = self.process_registry.load(runtime_key)
         runtime_active = (
             self.orchestrator.is_running(thread_id) or self.orchestrator.is_queued(thread_id) or bool(process)
@@ -567,7 +574,7 @@ class DevBotClient(discord.Client):
                 "このコマンドは管理対象スレッド内で実行してください。", ephemeral=True
             )
             return
-        issue = self.state_store.load_artifact(thread_id, "issue.json")
+        issue = self._artifact_dict(self.state_store.load_artifact(thread_id, "issue.json"))
         if not issue:
             await interaction.response.send_message("まだ Issue は作成されていません。", ephemeral=True)
             return
@@ -583,7 +590,7 @@ class DevBotClient(discord.Client):
                 "このコマンドは管理対象スレッド内で実行してください。", ephemeral=True
             )
             return
-        pr = self.state_store.load_artifact(self._runtime_key(thread_id), "pr.json")
+        pr = self._artifact_dict(self.state_store.load_artifact(self._runtime_key(thread_id), "pr.json"))
         if not pr:
             await interaction.response.send_message("まだ PR は作成されていません。", ephemeral=True)
             return
@@ -674,9 +681,9 @@ class DevBotClient(discord.Client):
             )
             return
         runtime_key = self._runtime_key(thread_id)
-        last_failure = self.state_store.load_artifact(runtime_key, "last_failure.json")
-        verification = self.state_store.load_artifact(runtime_key, "verification_summary.json")
-        final_result = self.state_store.load_artifact(runtime_key, "final_result.json")
+        last_failure = self._artifact_dict(self.state_store.load_artifact(runtime_key, "last_failure.json"))
+        verification = self._artifact_dict(self.state_store.load_artifact(runtime_key, "verification_summary.json"))
+        final_result = self._artifact_dict(self.state_store.load_artifact(runtime_key, "final_result.json"))
         await self._send_interaction_text(
             interaction,
             format_why_failed_message(
@@ -695,8 +702,8 @@ class DevBotClient(discord.Client):
             )
             return
         runtime_key = self._runtime_key(thread_id)
-        final_result = self.state_store.load_artifact(runtime_key, "final_result.json")
-        verification = self.state_store.load_artifact(runtime_key, "verification_summary.json")
+        final_result = self._artifact_dict(self.state_store.load_artifact(runtime_key, "final_result.json"))
+        verification = self._artifact_dict(self.state_store.load_artifact(runtime_key, "verification_summary.json"))
         await self._send_interaction_text(
             interaction,
             format_budget_message(
@@ -1205,7 +1212,7 @@ class DevBotClient(discord.Client):
         try:
             artifacts = await self._run_blocking(self._build_plan_artifacts, repo, thread_id, summary)
         except Exception as exc:
-            details = {"repo": repo}
+            details: dict[str, Any] = {"repo": repo}
             stderr: list[str] | None = None
             planning_progress = self.state_store.load_artifact(thread_id, "planning_progress.json")
             if isinstance(planning_progress, dict) and planning_progress:
