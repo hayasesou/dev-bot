@@ -19,6 +19,7 @@ class AgentResult:
     session_id: str | None = None
     total_cost_usd: float | None = None
     usage: dict[str, Any] | None = None
+    diagnostics: dict[str, Any] | None = None
 
 
 @dataclass(frozen=True)
@@ -46,12 +47,14 @@ class AgentJsonResponseError(RuntimeError):
         stderr: list[str] | None = None,
         session_id: str | None = None,
         prompt_kind: str | None = None,
+        diagnostics: dict[str, Any] | None = None,
     ) -> None:
         super().__init__(message)
         self.raw_response = raw_response
         self.stderr = stderr or []
         self.session_id = session_id
         self.prompt_kind = prompt_kind
+        self.diagnostics = diagnostics or {}
 
 
 class AgentForbiddenToolError(RuntimeError):
@@ -301,6 +304,10 @@ class ClaudeAgentClient:
                         peak_tokens=peak_tokens,
                         read_count=read_count,
                     )
+                diagnostics = _build_response_diagnostics(
+                    prompt_kind=prompt_kind,
+                    attempts=[result, retry_result],
+                )
                 detail = "\n".join((result.stderr or [])[-20:] + (retry_result.stderr or [])[-20:]).strip()
                 message = "Claude Agent SDK returned an empty response when JSON was expected."
                 if detail:
@@ -311,6 +318,7 @@ class ClaudeAgentClient:
                     stderr=(result.stderr or []) + (retry_result.stderr or []),
                     session_id=retry_result.session_id or result.session_id,
                     prompt_kind=prompt_kind,
+                    diagnostics=diagnostics,
                 )
         try:
             return AgentJsonEnvelope(
@@ -375,6 +383,10 @@ class ClaudeAgentClient:
                 stderr=result_stderr + list(retry_result.stderr or []),
                 session_id=retry_result.session_id or result.session_id,
                 prompt_kind=prompt_kind,
+                diagnostics=_build_response_diagnostics(
+                    prompt_kind=prompt_kind,
+                    attempts=[result, retry_result] if retry_result is not None else [result],
+                ),
             ) from None
 
     def _raise_for_forbidden_tool(self, result: AgentResult, *, prompt_kind: str | None) -> None:
@@ -533,21 +545,37 @@ async def _query_text(
     async def _collect_result() -> AgentResult:
         final_result: AgentResult | None = None
         assistant_chunks: list[str] = []
+        assistant_text_block_count = 0
+        event_trace: list[str] = []
         async for message in query(prompt=prompt, options=options):
             if isinstance(message, AssistantMessage):
+                event_trace.append("assistant")
                 for block in message.content:
                     if isinstance(block, TextBlock) and block.text.strip():
                         assistant_chunks.append(block.text)
+                        assistant_text_block_count += 1
             if isinstance(message, ResultMessage):
+                event_trace.append("result")
                 if message.is_error:
                     raise RuntimeError(message.result or "Claude Agent SDK execution failed.")
+                final_text = (message.result or "\n".join(assistant_chunks)).strip()
                 final_result = AgentResult(
-                    result=message.result or "\n".join(assistant_chunks).strip(),
+                    result=final_text,
                     structured_output=message.structured_output,
                     stderr=stderr_lines,
                     session_id=_coerce_session_id(message.session_id),
                     total_cost_usd=message.total_cost_usd,
                     usage=message.usage,
+                    diagnostics={
+                        "final_result_present": True,
+                        "final_stop_reason": str(getattr(message, "stop_reason", "") or ""),
+                        "final_is_error": bool(getattr(message, "is_error", False)),
+                        "final_result_length": len(final_text),
+                        "final_structured_output_present": message.structured_output is not None,
+                        "assistant_text_block_count": assistant_text_block_count,
+                        "assistant_text_total_length": sum(len(chunk) for chunk in assistant_chunks),
+                        "event_trace": event_trace[-12:],
+                    },
                 )
         if final_result is None:
             raise RuntimeError("Claude Agent SDK returned no final result.")
@@ -803,6 +831,67 @@ def _extract_buffer_overflow_error(
             return observed_max_buffer, "input_image", "image_reference"
 
     return observed_max_buffer, "unknown", ""
+
+
+def _build_response_diagnostics(
+    *,
+    prompt_kind: str | None,
+    attempts: list[AgentResult],
+) -> dict[str, Any]:
+    combined_stderr: list[str] = []
+    attempt_details: list[dict[str, Any]] = []
+    for index, attempt in enumerate(attempts):
+        combined_stderr.extend(list(attempt.stderr or []))
+        base = dict(attempt.diagnostics or {})
+        attempt_details.append(
+            {
+                "retry_attempt": index,
+                "session_id": _coerce_session_id(attempt.session_id) or "",
+                "final_result_present": bool(base.get("final_result_present", False)),
+                "final_stop_reason": str(base.get("final_stop_reason", "") or ""),
+                "final_is_error": bool(base.get("final_is_error", False)),
+                "final_result_length": int(base.get("final_result_length", len(attempt.result.strip()))),
+                "final_structured_output_present": bool(
+                    base.get("final_structured_output_present", attempt.structured_output is not None)
+                ),
+                "assistant_text_block_count": int(base.get("assistant_text_block_count", 0)),
+                "assistant_text_total_length": int(base.get("assistant_text_total_length", 0)),
+                "event_trace": list(base.get("event_trace", []))[-12:],
+            }
+        )
+    api_error_class, api_error_message = _extract_api_error_details(combined_stderr)
+    return {
+        "prompt_kind": prompt_kind or "unknown",
+        "response_attempts": attempt_details,
+        "api_error_class": api_error_class,
+        "api_error_message": api_error_message,
+    }
+
+
+def _extract_api_error_details(stderr_lines: list[str]) -> tuple[str, str]:
+    rate_limit = _extract_rate_limit_error(stderr_lines)
+    if rate_limit is not None:
+        _request_id, message = rate_limit
+        return "rate_limit", message
+
+    overloaded_pattern = re.compile(r'"type":"overloaded_error"|status[:= ]529|\b529\b', re.IGNORECASE)
+    server_error_pattern = re.compile(r"API error .* (500|502|503|504)\b")
+    transport_pattern = re.compile(
+        r"ECONNRESET|socket hang up|network error|fetch failed|connection reset|timed out",
+        re.IGNORECASE,
+    )
+    message_pattern = re.compile(r'"message":"(?P<message>[^"]+)"')
+
+    for line in stderr_lines:
+        if overloaded_pattern.search(line):
+            match = message_pattern.search(line)
+            return "overloaded", match.group("message").strip() if match else line.strip()
+        if server_error_pattern.search(line):
+            match = message_pattern.search(line)
+            return "server_error", match.group("message").strip() if match else line.strip()
+        if transport_pattern.search(line):
+            return "transport", line.strip()
+    return "unknown", ""
 
 
 def _build_options(

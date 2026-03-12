@@ -1,13 +1,14 @@
 {
   "unit": "pass",
-  "integration": "blocked",
+  "integration": "not_run",
   "lint": "pass",
   "typecheck": "pass",
   "manual_checks": [],
   "notes": [
-    "PASS: UV_CACHE_DIR=/tmp/uv-cache PYTHONPATH=. uv run pytest -q tests/test_discord_scheduler.py",
-    "PASS: UV_CACHE_DIR=/tmp/uv-cache PYTHONPATH=. uv run ruff check app/discord_adapter.py tests/test_discord_scheduler.py",
-    "PASS: UV_CACHE_DIR=/tmp/uv-cache PYTHONPATH=. uv run pyright",
-    "BLOCKED: UV_CACHE_DIR=/tmp/uv-cache PYTHONPATH=. uv run pytest -q --maxfail=1 failed in tests/test_health_check.py::HealthCheckServerTests::test_start_and_stop_lifecycle because the sandbox denied binding 0.0.0.0:0 with PermissionError: [Errno 1] Operation not permitted"
+    "PASS: UV_CACHE_DIR=/tmp/uv-cache PYTHONPATH=. uv run pytest -q tests/test_agent_sdk_client.py tests/test_discord_scheduler.py",
+    "PASS: UV_CACHE_DIR=/tmp/uv-cache PYTHONPATH=. uv run ruff check app/agent_sdk_client.py app/discord_adapter.py tests/test_agent_sdk_client.py tests/test_discord_scheduler.py",
+    "PASS: UV_CACHE_DIR=/tmp/uv-cache PYTHONPATH=. uv run ruff format --check app/agent_sdk_client.py app/discord_adapter.py tests/test_agent_sdk_client.py tests/test_discord_scheduler.py",
+    "PASS WITH WARNINGS: UV_CACHE_DIR=/tmp/uv-cache PYTHONPATH=. uv run pyright app completed with existing repository warnings and no new errors",
+    "NOT RUN: integration and full-suite verification were not re-executed for this scoped diagnostics and fixture-based planning test change"
   ]
 }

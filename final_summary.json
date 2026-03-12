@@ -2,11 +2,12 @@
   "success": true,
   "state": "Human Review",
   "summary": [
-    "Issue-bound /plan no longer publishes new plan artifacts until GitHub Plan is successfully reset to Drafted.",
-    "Issue-bound thread UI ignores stale local planning state so GitHub remains the authoritative blocking state after restart.",
-    "Re-planning an existing issue no longer overwrites the bound issue repository identity in local issue metadata."
+    "Claude Agent SDK empty/invalid JSON failures now record structured response diagnostics, including per-attempt result metadata and compact event traces.",
+    "Plan generation failure handling persists those diagnostics into last_failure details so /why-failed can distinguish empty end_turn-style responses from upstream API issues.",
+    "A fixture-based planning regression test now replays the draft 1481565649607331942 requirement summary through the /plan path and verifies empty-response detection is recorded."
   ],
   "risks": [
-    "Full-suite verification remains blocked in sandbox for the health check socket bind test."
+    "The new diagnostics improve classification, but root-cause removal still depends on observing more failing samples from the real Claude SDK/runtime path.",
+    "Pyright still reports pre-existing repository warnings; this change introduced no new type errors."
   ]
 }
