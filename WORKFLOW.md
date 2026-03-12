@@ -95,9 +95,12 @@ verification:
     - final_summary.json
     - run.log
   required_checks:
-    - tests
-    - lint
-    - typecheck
+    - name: lint
+      command: ruff check .
+    - name: tests
+      command: pytest -q
+    - name: typecheck
+      command: python -m py_compile app/*.py
 
 github:
   auth: app
@@ -126,6 +129,7 @@ Operating rules:
 - Only start a new implementation run unless Project field `Plan` is `Approved` and Project field `State` is one of `Ready` or `Rework`.
 - Treat Project field `State = In Progress` as an already-active run that must be reconciled, not as a signal to start a second run.
 - Treat Project field `State = Merging` as an active post-approval land step owned by the agent.
+- Reserve `thread/resume` for crash recovery of the same `run_id`; do not use it for normal retries.
 - Only modify files inside the current issue workspace.
 - Never push directly to the default branch.
 - Use the repository root `AGENTS.md` and repo-local skills before making substantial changes.
