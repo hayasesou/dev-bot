@@ -1456,6 +1456,7 @@ class DiscordSchedulerAsyncTests(unittest.IsolatedAsyncioTestCase):
             return_value={
                 "plan": {"steps": ["one"]},
                 "test_plan": {"checks": ["tests"]},
+                "verification_plan": {"profile": "generic-minimal"},
                 "repo_profile": {"repo": "owner/repo"},
                 "planning_workspace": {"base_branch": "main"},
                 "planning_sessions": {},
@@ -1504,6 +1505,7 @@ class DiscordSchedulerAsyncTests(unittest.IsolatedAsyncioTestCase):
             return_value={
                 "plan": {"steps": ["one"]},
                 "test_plan": {"checks": ["tests"]},
+                "verification_plan": {"profile": "generic-minimal"},
                 "repo_profile": {"repo": "owner/repo"},
                 "planning_workspace": {"base_branch": "main"},
                 "planning_sessions": {},
@@ -1555,6 +1557,7 @@ class DiscordSchedulerAsyncTests(unittest.IsolatedAsyncioTestCase):
             return_value={
                 "plan": {"steps": ["one"]},
                 "test_plan": {"checks": ["tests"]},
+                "verification_plan": {"profile": "generic-minimal"},
                 "repo_profile": {"repo": "owner/other-repo"},
                 "planning_workspace": {"base_branch": "main"},
                 "planning_sessions": {},
@@ -1598,7 +1601,12 @@ class DiscordSchedulerAsyncTests(unittest.IsolatedAsyncioTestCase):
         self.client.planning_agent.build_artifacts = MagicMock(
             side_effect=lambda **kwargs: (
                 kwargs["progress_callback"]({"status": "test_plan_generating", "phase": "overview"}),
-                SimpleNamespace(repo_profile={"repo": "owner/repo"}, plan={"steps": ["one"]}, test_plan={"checks": []}),
+                SimpleNamespace(
+                    repo_profile={"repo": "owner/repo"},
+                    plan={"steps": ["one"]},
+                    test_plan={"checks": []},
+                    verification_plan={"profile": "generic-minimal"},
+                ),
             )[1]
         )
 
@@ -1610,6 +1618,7 @@ class DiscordSchedulerAsyncTests(unittest.IsolatedAsyncioTestCase):
             "test_plan_generating", self.state_store.load_artifact(thread_id, "planning_progress.json")["status"]
         )
         self.assertEqual({"steps": ["one"]}, result["plan"])
+        self.assertEqual({"profile": "generic-minimal"}, result["verification_plan"])
 
     async def test_build_plan_artifacts_replaces_stale_debug_artifacts_with_latest_response(self) -> None:
         thread_id = 321
@@ -1632,7 +1641,12 @@ class DiscordSchedulerAsyncTests(unittest.IsolatedAsyncioTestCase):
                     "diagnostics": {},
                 }
             )
-            return SimpleNamespace(repo_profile={"repo": "owner/repo"}, plan={"steps": ["one"]}, test_plan={"checks": []})
+            return SimpleNamespace(
+                repo_profile={"repo": "owner/repo"},
+                plan={"steps": ["one"]},
+                test_plan={"checks": []},
+                verification_plan={"profile": "generic-minimal"},
+            )
 
         self.client.planning_agent.build_artifacts = MagicMock(side_effect=_build_artifacts)
 
@@ -1681,6 +1695,7 @@ class DiscordSchedulerAsyncTests(unittest.IsolatedAsyncioTestCase):
             return_value={
                 "plan": {"steps": ["one"]},
                 "test_plan": {"checks": ["tests"]},
+                "verification_plan": {"profile": "generic-minimal"},
                 "repo_profile": {"repo": "owner/repo"},
                 "planning_workspace": {"base_branch": "main"},
                 "planning_sessions": {},
