@@ -1,12 +1,17 @@
 from __future__ import annotations
 
+import json
+import sys
 import tempfile
+import types
 import unittest
+from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
-from unittest.mock import AsyncMock, MagicMock
+from unittest.mock import AsyncMock, MagicMock, patch
 
 from app import run_request
+from app.agent_sdk_client import AgentJsonResponseError
 from app.discord_adapter import DevBotClient
 from app.state_store import FileStateStore
 from tests.helpers import make_test_settings
@@ -188,6 +193,196 @@ class DiscordSchedulerAsyncTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual("91234", self.state_store.thread_id_for_issue("owner/repo#42"))
         self.assertEqual(1, len(self.status_channel.created_threads))
         self.assertEqual("owner/repo#42", self.state_store.load_draft_meta(91234)["issue_key"])
+
+    async def test_generate_plan_records_agent_diagnostics_for_empty_json_response(self) -> None:
+        thread_id = 321
+        self.state_store.create_run(thread_id=thread_id, parent_message_id=1, channel_id=2)
+        self.state_store.write_artifact(thread_id, "requirement_summary.json", {"goal": "ship"})
+
+        class _Resp:
+            async def defer(self, thinking: bool = False) -> None:
+                del thinking
+
+        class _Chan(_FakeThread):
+            def __init__(self, channel_id: int) -> None:
+                super().__init__(channel_id)
+
+        interaction = MagicMock()
+        interaction.channel = _Chan(thread_id)
+        interaction.response = _Resp()
+        self.client._ensure_managed_thread = lambda channel: thread_id  # type: ignore[method-assign]
+
+        async def _send_followup_text(_interaction, content: str, *, ephemeral: bool = False) -> None:
+            del _interaction, content, ephemeral
+
+        self.client._send_followup_text = _send_followup_text  # type: ignore[method-assign]
+
+        self.client._build_plan_artifacts = MagicMock(
+            side_effect=AgentJsonResponseError(
+                "Claude Agent SDK returned an empty response when JSON was expected.",
+                raw_response="",
+                stderr=["line1"],
+                session_id="sess_b",
+                prompt_kind="test_plan",
+                diagnostics={
+                    "prompt_kind": "test_plan",
+                    "response_attempts": [
+                        {
+                            "retry_attempt": 0,
+                            "session_id": "sess_a",
+                            "final_result_present": True,
+                            "final_stop_reason": "end_turn",
+                            "final_is_error": False,
+                            "final_result_length": 0,
+                            "final_structured_output_present": False,
+                            "assistant_text_block_count": 1,
+                            "assistant_text_total_length": 12,
+                            "event_trace": ["assistant", "result"],
+                        },
+                        {
+                            "retry_attempt": 1,
+                            "session_id": "sess_b",
+                            "final_result_present": True,
+                            "final_stop_reason": "end_turn",
+                            "final_is_error": False,
+                            "final_result_length": 0,
+                            "final_structured_output_present": False,
+                            "assistant_text_block_count": 0,
+                            "assistant_text_total_length": 0,
+                            "event_trace": ["result"],
+                        },
+                    ],
+                    "api_error_class": "overloaded",
+                    "api_error_message": "Overloaded",
+                },
+            )
+        )
+
+        await self.client._generate_plan(interaction, "owner/repo", alias_used=False)
+
+        failure = self.state_store.load_artifact(thread_id, "last_failure.json")
+        self.assertEqual("test_plan", failure["details"]["prompt_kind"])
+        self.assertEqual("overloaded", failure["details"]["api_error_class"])
+        self.assertEqual("end_turn", failure["details"]["response_attempts"][0]["final_stop_reason"])
+
+    async def test_generate_plan_with_fixture_summary_records_empty_response_diagnostics(self) -> None:
+        thread_id = 654
+        self.state_store.create_run(thread_id=thread_id, parent_message_id=1, channel_id=2)
+        fixture_path = (
+            Path(__file__).resolve().parent / "fixtures" / "drafts" / "1481565649607331942" / "requirement_summary.json"
+        )
+        summary = json.loads(fixture_path.read_text(encoding="utf-8"))
+        self.state_store.write_artifact(thread_id, "requirement_summary.json", summary)
+
+        workspace_root = Path(self.tmpdir.name) / "fixture-workspace"
+        workspace_root.mkdir()
+        (workspace_root / "README.md").write_text("# Fixture workspace\n", encoding="utf-8")
+        (workspace_root / "pyproject.toml").write_text(
+            "[project]\nname = 'fixture'\nversion = '0.1.0'\n", encoding="utf-8"
+        )
+
+        class _Resp:
+            async def defer(self, thinking: bool = False) -> None:
+                del thinking
+
+        class _Chan(_FakeThread):
+            def __init__(self, channel_id: int) -> None:
+                super().__init__(channel_id)
+
+        interaction = MagicMock()
+        interaction.channel = _Chan(thread_id)
+        interaction.response = _Resp()
+        self.client._ensure_managed_thread = lambda channel: thread_id  # type: ignore[method-assign]
+
+        async def _send_followup_text(_interaction, content: str, *, ephemeral: bool = False) -> None:
+            del _interaction, content, ephemeral
+
+        self.client._send_followup_text = _send_followup_text  # type: ignore[method-assign]
+        self.client.pipeline.workspace_manager.prepare_plan_workspace = MagicMock(
+            return_value={"workspace": str(workspace_root), "base_branch": "main"}
+        )
+
+        fake_module = types.ModuleType("claude_agent_sdk")
+
+        class FakeOptions:
+            def __init__(self, **kwargs: Any) -> None:
+                self.kwargs = kwargs
+
+        class TextBlock:
+            def __init__(self, text: str) -> None:
+                self.text = text
+
+        class AssistantMessage:
+            def __init__(self, content: list[Any]) -> None:
+                self.content = content
+
+        class ResultMessage:
+            def __init__(
+                self,
+                *,
+                result: str = "",
+                structured_output: Any = None,
+                is_error: bool = False,
+                session_id: str = "",
+                stop_reason: str = "end_turn",
+            ) -> None:
+                self.result = result
+                self.structured_output = structured_output
+                self.is_error = is_error
+                self.session_id = session_id
+                self.stop_reason = stop_reason
+                self.total_cost_usd = None
+                self.usage = None
+
+        responses: list[list[Any]] = [
+            [
+                ResultMessage(
+                    result='{"goal":"fixture plan","scope":[],"assumptions":[],"candidate_files":[],"implementation_steps":[],"verification_steps":[],"risks":[],"high_risk_changes":[]}',
+                    session_id="sess_plan",
+                )
+            ],
+            [
+                ResultMessage(
+                    result='{"test_targets":[],"strategy":{"unit":[],"integration":[],"e2e":[],"mocking":[]}}',
+                    session_id="sess_overview",
+                )
+            ],
+            [
+                AssistantMessage([TextBlock("partial output")]),
+                ResultMessage(result="", session_id="sess_empty_a", stop_reason="end_turn"),
+            ],
+            [
+                ResultMessage(result="", session_id="sess_empty_b", stop_reason="end_turn"),
+            ],
+        ]
+
+        async def query(*, prompt: str, options: Any):  # type: ignore[no-untyped-def]
+            del prompt, options
+            current = responses.pop(0)
+            for item in current:
+                yield item
+
+        fake_module.ClaudeAgentOptions = FakeOptions
+        fake_module.TextBlock = TextBlock
+        fake_module.AssistantMessage = AssistantMessage
+        fake_module.ResultMessage = ResultMessage
+        fake_module.query = query
+
+        with patch.dict(sys.modules, {"claude_agent_sdk": fake_module}):
+            with patch("app.agent_sdk_client._resolve_claude_cli", return_value="/tmp/claude"):
+                with patch("app.agent_sdk_client._claude_version", return_value="1.0.0"):
+                    with patch("app.agent_sdk_client._claude_preflight", return_value={"ok": True}):
+                        await self.client._generate_plan(interaction, "fixture/repo", alias_used=False)
+
+        failure = self.state_store.load_artifact(thread_id, "last_failure.json")
+        self.assertEqual("test_plan", failure["details"]["prompt_kind"])
+        self.assertEqual("unknown", failure["details"]["api_error_class"])
+        self.assertEqual(2, len(failure["details"]["response_attempts"]))
+        self.assertEqual("sess_empty_a", failure["details"]["response_attempts"][0]["session_id"])
+        self.assertEqual("end_turn", failure["details"]["response_attempts"][0]["final_stop_reason"])
+        self.assertEqual(1, failure["details"]["response_attempts"][0]["assistant_text_block_count"])
+        self.assertEqual(["assistant", "result"], failure["details"]["response_attempts"][0]["event_trace"])
+        self.assertEqual(summary["goal"], self.state_store.load_artifact(thread_id, "requirement_summary.json")["goal"])
 
     async def test_scheduler_tick_does_not_dispatch_from_local_cache_when_project_sync_fails(self) -> None:
         issue_key = "owner/repo#42"

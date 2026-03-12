@@ -1201,6 +1201,8 @@ class DevBotClient(discord.Client):
                         "raw_response": exc.raw_response,
                     }
                 )
+                if exc.diagnostics:
+                    details.update(exc.diagnostics)
                 stderr = exc.stderr
             self.state_store.record_failure(
                 thread_id,

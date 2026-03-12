@@ -15,6 +15,7 @@ from app.agent_sdk_client import (
     AgentResult,
     ClaudeAgentClient,
     _build_options,
+    _extract_api_error_details,
     _extract_buffer_overflow_error,
     _extract_context_overload_error,
     _extract_oversized_read_error,
@@ -77,6 +78,8 @@ class ClaudeAgentClientTests(unittest.TestCase):
         self.assertEqual("sess_b", ctx.exception.session_id)
         self.assertEqual("still not json", ctx.exception.raw_response)
         self.assertEqual(["stderr1", "stderr2"], ctx.exception.stderr)
+        self.assertEqual("test_plan", ctx.exception.diagnostics["prompt_kind"])
+        self.assertEqual(2, len(ctx.exception.diagnostics["response_attempts"]))
 
     def test_json_response_raises_forbidden_tool_error_with_tool_details(self) -> None:
         client = StubClaudeAgentClient(
@@ -145,6 +148,15 @@ class ClaudeAgentClientTests(unittest.TestCase):
             ),
             parsed,
         )
+
+    def test_extract_api_error_details_parses_overloaded_message(self) -> None:
+        parsed = _extract_api_error_details(
+            [
+                '2026-03-12T08:25:20.000Z [ERROR] API error (attempt 1/3): 529 {"type":"error","error":{"type":"overloaded_error","message":"Overloaded"}}'
+            ]
+        )
+
+        self.assertEqual(("overloaded", "Overloaded"), parsed)
 
     def test_rate_limit_error_is_structured_exception(self) -> None:
         error = AgentRateLimitError(
@@ -303,3 +315,76 @@ class ClaudeAgentClientTests(unittest.TestCase):
         self.assertEqual("sess_b", ctx.exception.session_id)
         self.assertEqual("52696", ctx.exception.peak_tokens)
         self.assertEqual(3, ctx.exception.read_count)
+
+    def test_json_response_empty_response_includes_attempt_diagnostics(self) -> None:
+        client = StubClaudeAgentClient(
+            [
+                AgentResult(
+                    result="",
+                    session_id="sess_a",
+                    stderr=[
+                        '2026-03-12T08:24:41.950Z [ERROR] API error (attempt 1/2): 529 {"type":"error","error":{"type":"overloaded_error","message":"Overloaded"}}'
+                    ],
+                    diagnostics={
+                        "final_result_present": True,
+                        "final_stop_reason": "end_turn",
+                        "final_is_error": False,
+                        "final_result_length": 0,
+                        "final_structured_output_present": False,
+                        "assistant_text_block_count": 1,
+                        "assistant_text_total_length": 12,
+                        "event_trace": ["assistant", "result"],
+                    },
+                ),
+                AgentResult(
+                    result="",
+                    session_id="sess_b",
+                    stderr=["retry stderr"],
+                    diagnostics={
+                        "final_result_present": True,
+                        "final_stop_reason": "end_turn",
+                        "final_is_error": False,
+                        "final_result_length": 0,
+                        "final_structured_output_present": False,
+                        "assistant_text_block_count": 0,
+                        "assistant_text_total_length": 0,
+                        "event_trace": ["result"],
+                    },
+                ),
+            ]
+        )
+
+        with self.assertRaises(AgentJsonResponseError) as ctx:
+            client.json_response("system", "prompt", prompt_kind="test_plan")
+
+        self.assertEqual("overloaded", ctx.exception.diagnostics["api_error_class"])
+        self.assertEqual("Overloaded", ctx.exception.diagnostics["api_error_message"])
+        self.assertEqual(
+            [
+                {
+                    "retry_attempt": 0,
+                    "session_id": "sess_a",
+                    "final_result_present": True,
+                    "final_stop_reason": "end_turn",
+                    "final_is_error": False,
+                    "final_result_length": 0,
+                    "final_structured_output_present": False,
+                    "assistant_text_block_count": 1,
+                    "assistant_text_total_length": 12,
+                    "event_trace": ["assistant", "result"],
+                },
+                {
+                    "retry_attempt": 1,
+                    "session_id": "sess_b",
+                    "final_result_present": True,
+                    "final_stop_reason": "end_turn",
+                    "final_is_error": False,
+                    "final_result_length": 0,
+                    "final_structured_output_present": False,
+                    "assistant_text_block_count": 0,
+                    "assistant_text_total_length": 0,
+                    "event_trace": ["result"],
+                },
+            ],
+            ctx.exception.diagnostics["response_attempts"],
+        )
