@@ -408,6 +408,8 @@ class DevBotClient(discord.Client):
             return meta
         draft_meta = self.state_store.load_draft_meta(thread_id)
         draft_status = str(draft_meta.get("status", "")).strip()
+        if draft_status == "planning":
+            return meta
         if draft_status not in THREAD_LOCAL_STATUSES:
             return meta
         merged = dict(meta)
@@ -1205,7 +1207,9 @@ class DevBotClient(discord.Client):
         await interaction.response.defer(thinking=True)
         issue_key = self.state_store.issue_key_for_thread(thread_id)
         if issue_key:
-            self.state_store.update_draft_meta(thread_id, status="planning", github_repo=repo)
+            issue_meta = self.state_store.load_issue_meta(issue_key)
+            issue_repo = str(issue_meta.get("github_repo", "")).strip()
+            self.state_store.update_draft_meta(thread_id, github_repo=issue_repo or repo)
         else:
             self.state_store.update_status(thread_id, "planning")
         self.state_store.write_artifact(thread_id, "planning_progress.json", {"status": "planning", "phase": "plan"})
@@ -1307,17 +1311,13 @@ class DevBotClient(discord.Client):
             )
             return
 
-        self._clear_execution_artifacts(thread_id)
-        self._persist_artifacts(
-            thread_id,
-            {
-                "plan": artifacts["plan"],
-                "test_plan": artifacts["test_plan"],
-                "repo_profile": artifacts["repo_profile"],
-                "planning_workspace": artifacts["planning_workspace"],
-                "planning_sessions": artifacts["planning_sessions"],
-            },
-        )
+        planning_artifacts = {
+            "plan": artifacts["plan"],
+            "test_plan": artifacts["test_plan"],
+            "repo_profile": artifacts["repo_profile"],
+            "planning_workspace": artifacts["planning_workspace"],
+            "planning_sessions": artifacts["planning_sessions"],
+        }
         base_branch = str(artifacts["planning_workspace"].get("base_branch", ""))
         if issue_key:
             issue_meta = self.state_store.load_issue_meta(issue_key)
@@ -1331,7 +1331,7 @@ class DevBotClient(discord.Client):
                     details={"issue_key": issue_key, "repo": repo, "base_branch": base_branch},
                 )
                 self.state_store.update_draft_meta(
-                    thread_id, status="failed", github_repo=repo, base_branch=base_branch
+                    thread_id, status="failed", github_repo=issue_repo, base_branch=base_branch
                 )
                 await self._send_followup_text(
                     interaction,
@@ -1355,7 +1355,7 @@ class DevBotClient(discord.Client):
                     },
                 )
                 self.state_store.update_draft_meta(
-                    thread_id, status="failed", github_repo=repo, base_branch=base_branch
+                    thread_id, status="failed", github_repo=issue_repo, base_branch=base_branch
                 )
                 await self._send_followup_text(
                     interaction,
@@ -1363,19 +1363,22 @@ class DevBotClient(discord.Client):
                     ephemeral=True,
                 )
                 return
+            self._clear_execution_artifacts(thread_id)
+            self._persist_artifacts(thread_id, planning_artifacts)
             self.state_store.update_draft_meta(
                 thread_id,
                 status="awaiting_approval",
-                github_repo=repo,
+                github_repo=issue_repo,
                 base_branch=base_branch,
             )
             self.state_store.update_issue_meta(
                 issue_key,
                 plan_state="Drafted",
-                github_repo=repo,
                 base_branch=base_branch,
             )
         else:
+            self._clear_execution_artifacts(thread_id)
+            self._persist_artifacts(thread_id, planning_artifacts)
             self.state_store.update_meta(
                 thread_id,
                 status="awaiting_approval",

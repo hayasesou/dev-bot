@@ -293,7 +293,7 @@ class DiscordSchedulerAsyncTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual("Human Review", self.state_store.load_issue_meta(issue_key)["status"])
         self.assertEqual("requirements_dialogue", self.state_store.load_draft_meta(thread_id)["status"])
 
-    async def test_handle_thread_message_blocks_when_bound_thread_is_in_local_planning_state(self) -> None:
+    async def test_load_thread_ui_meta_ignores_local_planning_state_for_bound_issue(self) -> None:
         thread_id = 321
         issue_key = "owner/repo#42"
         self.state_store.create_run(thread_id=thread_id, parent_message_id=10, channel_id=20)
@@ -305,17 +305,10 @@ class DiscordSchedulerAsyncTests(unittest.IsolatedAsyncioTestCase):
             github_repo="owner/repo",
         )
         self.state_store.update_draft_meta(thread_id, status="planning")
-        called = {"parse": False}
 
-        async def _parse_message_inputs(_message):
-            called["parse"] = True
-            return {"error": None}
+        meta = self.client._load_thread_ui_meta(thread_id)
 
-        self.client._parse_message_inputs = _parse_message_inputs  # type: ignore[method-assign]
-
-        await self.client._handle_thread_message(_FakeMessage(_FakeThread(thread_id)))
-
-        self.assertFalse(called["parse"])
+        self.assertEqual("Human Review", meta["status"])
 
     async def test_handle_thread_message_blocks_when_issue_is_ready_even_if_draft_is_promoted(self) -> None:
         thread_id = 321
@@ -1263,7 +1256,51 @@ class DiscordSchedulerAsyncTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual("Approved", self.state_store.load_issue_meta("owner/repo#42")["plan_state"])
         self.assertEqual("failed", self.state_store.load_draft_meta(thread_id)["status"])
+        self.assertEqual({}, self.state_store.load_artifact("owner/repo#42", "plan.json"))
+        self.assertEqual({}, self.state_store.load_artifact("owner/repo#42", "test_plan.json"))
         self.assertTrue(sent)
+
+    async def test_generate_plan_for_bound_issue_keeps_existing_issue_repo_identity(self) -> None:
+        thread_id = 321
+        issue_key = "owner/repo#42"
+        self.state_store.create_run(thread_id=thread_id, parent_message_id=1, channel_id=2)
+        self.state_store.write_artifact(thread_id, "requirement_summary.json", {"goal": "ship"})
+        self.state_store.bind_issue(thread_id, "owner/repo", 42)
+        self.state_store.update_issue_meta(
+            issue_key,
+            github_repo="owner/repo",
+            issue_number="42",
+            status="Human Review",
+        )
+        self.client.github_client = MagicMock()
+        self.client._build_plan_artifacts = MagicMock(
+            return_value={
+                "plan": {"steps": ["one"]},
+                "test_plan": {"checks": ["tests"]},
+                "repo_profile": {"repo": "owner/other-repo"},
+                "planning_workspace": {"base_branch": "main"},
+                "planning_sessions": {},
+            }
+        )
+
+        class _Resp:
+            async def defer(self, thinking: bool = False) -> None:
+                del thinking
+
+        interaction = MagicMock()
+        interaction.channel = _FakeThread(thread_id)
+        interaction.response = _Resp()
+        self.client._ensure_managed_thread = lambda channel: thread_id  # type: ignore[method-assign]
+
+        async def _send_followup_text(_interaction, content: str, *, ephemeral: bool = False) -> None:
+            del _interaction, content, ephemeral
+
+        self.client._send_followup_text = _send_followup_text  # type: ignore[method-assign]
+
+        await self.client._generate_plan(interaction, "owner/other-repo", alias_used=False)
+
+        self.client.github_client.update_issue_plan.assert_called_with("owner/repo", 42, "Drafted")
+        self.assertEqual("owner/repo", self.state_store.load_issue_meta(issue_key)["github_repo"])
 
     async def test_build_plan_artifacts_progress_keeps_canonical_issue_state_for_bound_thread(self) -> None:
         thread_id = 321
