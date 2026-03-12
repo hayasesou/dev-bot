@@ -1,0 +1,6 @@
+{
+  "changed_files": [
+    "app/discord_adapter.py",
+    "tests/test_discord_scheduler.py"
+  ]
+}

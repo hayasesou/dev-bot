@@ -1,0 +1,12 @@
+{
+  "success": true,
+  "state": "Human Review",
+  "summary": [
+    "Issue-bound /plan no longer publishes new plan artifacts until GitHub Plan is successfully reset to Drafted.",
+    "Issue-bound thread UI ignores stale local planning state so GitHub remains the authoritative blocking state after restart.",
+    "Re-planning an existing issue no longer overwrites the bound issue repository identity in local issue metadata."
+  ],
+  "risks": [
+    "Full-suite verification remains blocked in sandbox for the health check socket bind test."
+  ]
+}
