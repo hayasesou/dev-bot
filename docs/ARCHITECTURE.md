@@ -1,5 +1,11 @@
 # Architecture
 
+## Design Lineage
+- この設計は symphonyn の思想を受け継いでいる
+- 対話の場と実行の正本を分離し、操作 UI と scheduler contract を混同しない
+- 人間との対話は Discord に置きつつ、実行可否の最終判定は GitHub Issue / Projects v2 に集約する
+- そのうえで、このリポジトリでは planning lane と execution lane を分離し、artifact-driven に実装へ接続する形へ再構成している
+
 ## Source Of Truth
 - GitHub Issues: work item 本体
 - GitHub Projects v2: canonical scheduler state
