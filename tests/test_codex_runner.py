@@ -1,4 +1,5 @@
 from __future__ import annotations
+
 import json
 import unittest
 from pathlib import Path
@@ -26,7 +27,11 @@ class CodexRunnerTests(unittest.TestCase):
 
                 async def collect_outputs(self, _handle):
                     return RunArtifacts(
-                        implementation_result={"candidate_id": "primary", "summary": "done", "changed_files": ["app/x.py"]},
+                        implementation_result={
+                            "candidate_id": "primary",
+                            "summary": "done",
+                            "changed_files": ["app/x.py"],
+                        },
                         changed_files=["app/x.py"],
                         summary="done",
                         returncode=0,
@@ -49,7 +54,9 @@ class CodexRunnerTests(unittest.TestCase):
 
             self.assertEqual("app-server", result.mode)
             self.assertEqual(["app/x.py"], result.changed_files)
-            payload = json.loads((Path(tmpdir) / "artifacts" / "implementation_result.json").read_text(encoding="utf-8"))
+            payload = json.loads(
+                (Path(tmpdir) / "artifacts" / "implementation_result.json").read_text(encoding="utf-8")
+            )
             self.assertEqual("done", payload["summary"])
 
     def test_run_skips_app_server_when_disabled(self) -> None:

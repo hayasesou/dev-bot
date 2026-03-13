@@ -3,8 +3,7 @@ from __future__ import annotations
 import asyncio
 import json
 import subprocess
-from dataclasses import asdict, is_dataclass
-from dataclasses import dataclass
+from dataclasses import asdict, dataclass, is_dataclass
 from datetime import UTC, datetime
 from functools import partial
 from pathlib import Path
@@ -1249,7 +1248,9 @@ class DevelopmentPipeline:
     ) -> None:
         if not self._telemetry_enabled(workflow):
             return
-        sink = JsonlTelemetrySink(self.state_store.execution_artifacts_dir(issue_key, run_id) / "telemetry" / "events.jsonl")
+        sink = JsonlTelemetrySink(
+            self.state_store.execution_artifacts_dir(issue_key, run_id) / "telemetry" / "events.jsonl"
+        )
         sink.write_event(
             event=event,
             issue_key=issue_key,

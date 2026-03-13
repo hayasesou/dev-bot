@@ -4,15 +4,15 @@ import json
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import MagicMock
 
-from app.contracts.workflow_schema import TelemetryConfig, WorkflowConfig
-from app.telemetry.jsonl import JsonlTelemetrySink
-from app.pipeline import DevelopmentPipeline
 from app.approvals import ApprovalCoordinator
+from app.contracts.workflow_schema import TelemetryConfig, WorkflowConfig
+from app.pipeline import DevelopmentPipeline
 from app.process_registry import ProcessRegistry
 from app.state_store import FileStateStore
+from app.telemetry.jsonl import JsonlTelemetrySink
 from tests.helpers import make_test_settings
-from unittest.mock import MagicMock
 
 
 class JsonlTelemetrySinkTests(unittest.TestCase):

@@ -27,7 +27,9 @@ class CodexAppServerBackend(ExecutionBackend):
         self._closed = False
 
     async def start_run(self, spec: RunSpec) -> RunHandle:
-        self._artifacts_dir = Path(spec.artifacts_dir).resolve() if spec.artifacts_dir else (Path(spec.cwd) / "artifacts")
+        self._artifacts_dir = (
+            Path(spec.artifacts_dir).resolve() if spec.artifacts_dir else (Path(spec.cwd) / "artifacts")
+        )
         self._artifacts_dir.mkdir(parents=True, exist_ok=True)
         self._event_log_path = self._artifacts_dir / "raw_codex_events.jsonl"
         self._active_run_id = spec.run_id
@@ -278,9 +280,7 @@ class CodexAppServerBackend(ExecutionBackend):
         ]
         result = params.get("result")
         if isinstance(result, dict):
-            candidates.extend(
-                [result.get("output"), result.get("structuredOutput"), result.get("structured_output")]
-            )
+            candidates.extend([result.get("output"), result.get("structuredOutput"), result.get("structured_output")])
         for candidate in candidates:
             if isinstance(candidate, dict):
                 return candidate
@@ -307,7 +307,7 @@ class CodexAppServerBackend(ExecutionBackend):
             self._proc.terminate()
             try:
                 await asyncio.wait_for(self._proc.wait(), timeout=1)
-            except asyncio.TimeoutError:
+            except TimeoutError:
                 self._proc.kill()
                 await self._proc.wait()
         if self._reader_task is not None:

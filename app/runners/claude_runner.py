@@ -90,9 +90,7 @@ class _ClaudeReviewRole:
             f"verification_summary:\n{json.dumps(ctx.verification_summary, ensure_ascii=False, indent=2)}\n\n"
             f"plan:\n{json.dumps(ctx.plan, ensure_ascii=False, indent=2)}\n\n"
             f"test_plan:\n{json.dumps(ctx.test_plan, ensure_ascii=False, indent=2)}\n\n"
-            "Task:\n"
-            + "\n".join(f"- {line}" for line in self.task_lines)
-            + "\nReturn JSON only."
+            "Task:\n" + "\n".join(f"- {line}" for line in self.task_lines) + "\nReturn JSON only."
         )
         payload = self.client.json_response(
             system="You are a code review specialist. Return findings JSON only.",
@@ -177,9 +175,7 @@ def _review_findings_from_payload(payload: dict[str, Any]) -> ReviewFindingsV1:
                 claim=str(item.get("claim", "")).strip(),
                 evidence=[str(entry) for entry in item.get("evidence", []) if str(entry).strip()],
                 verifier_status=str(item.get("verifier_status", "unverified")).strip() or "unverified",
-                suggested_fix=(
-                    str(item["suggested_fix"]).strip() if item.get("suggested_fix") is not None else None
-                ),
+                suggested_fix=(str(item["suggested_fix"]).strip() if item.get("suggested_fix") is not None else None),
             )
         )
     return ReviewFindingsV1(findings=findings)
@@ -329,7 +325,9 @@ class ClaudeRunner:
             {
                 finding.file
                 for finding in all_findings
-                if "protected" in finding.claim.lower() or "/.github/" in finding.file or finding.file.startswith(".github/")
+                if "protected" in finding.claim.lower()
+                or "/.github/" in finding.file
+                or finding.file.startswith(".github/")
             }
         )
         risk_items = [
