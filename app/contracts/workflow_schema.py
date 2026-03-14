@@ -96,6 +96,20 @@ class PlanningGates:
 
 
 @dataclass(frozen=True, slots=True)
+class PlanningLegacyFallbackConfig:
+    enabled: bool = True
+    use_only_on_committee_failure: bool = True
+
+    @classmethod
+    def from_dict(cls, payload: Any) -> PlanningLegacyFallbackConfig:
+        data = _require_mapping(payload, field_name="planning.legacy_fallback")
+        return cls(
+            enabled=bool(data.get("enabled", True)),
+            use_only_on_committee_failure=bool(data.get("use_only_on_committee_failure", True)),
+        )
+
+
+@dataclass(frozen=True, slots=True)
 class PlanningConfig:
     provider: str
     enabled: bool = True
@@ -106,6 +120,7 @@ class PlanningConfig:
     settings_sources: list[str] = field(default_factory=lambda: ["project"])
     allowed_tools: list[str] = field(default_factory=list)
     skill_mode: str = ""
+    legacy_fallback: PlanningLegacyFallbackConfig = field(default_factory=PlanningLegacyFallbackConfig)
     committee: PlanningCommitteeConfig | None = None
     gates: PlanningGates = field(default_factory=PlanningGates)
 
@@ -119,6 +134,11 @@ class PlanningConfig:
         if "committee" in data:
             committee = PlanningCommitteeConfig.from_dict(data["committee"])
         gates = PlanningGates.from_dict(data.get("gates", {})) if "gates" in data else PlanningGates()
+        legacy_fallback = (
+            PlanningLegacyFallbackConfig.from_dict(data["legacy_fallback"])
+            if "legacy_fallback" in data
+            else PlanningLegacyFallbackConfig()
+        )
         return cls(
             provider=provider,
             enabled=bool(data.get("enabled", True)),
@@ -135,6 +155,7 @@ class PlanningConfig:
                 field_name="planning.allowed_tools",
             ),
             skill_mode=str(data.get("skill_mode", "")).strip(),
+            legacy_fallback=legacy_fallback,
             committee=committee,
             gates=gates,
         )
@@ -144,7 +165,7 @@ class PlanningConfig:
 class CandidateModeTriggers:
     rework_count_gte: int = 1
     planner_confidence_lt: float = 0.75
-    require_clear_design_branches: bool = True
+    require_clear_design_branches: bool = False
 
     @classmethod
     def from_dict(cls, payload: Any) -> CandidateModeTriggers:
@@ -152,7 +173,56 @@ class CandidateModeTriggers:
         return cls(
             rework_count_gte=int(data.get("rework_count_gte", 1)),
             planner_confidence_lt=float(data.get("planner_confidence_lt", 0.75)),
-            require_clear_design_branches=bool(data.get("require_clear_design_branches", True)),
+            require_clear_design_branches=bool(data.get("require_clear_design_branches", False)),
+        )
+
+
+@dataclass(frozen=True, slots=True)
+class ProtectedConfigAllowlistSource:
+    issue_body_section: str = "保護設定変更許可リスト"
+    artifacts: list[str] = field(default_factory=lambda: ["protected_config_allowlist.json"])
+
+    @classmethod
+    def from_dict(cls, payload: Any) -> ProtectedConfigAllowlistSource:
+        data = _require_mapping(payload, field_name="protected_config.allowlist_source")
+        priority = _require_list_of_mappings(
+            data.get("priority", []),
+            field_name="protected_config.allowlist_source.priority",
+        )
+        issue_body_section = "保護設定変更許可リスト"
+        artifacts: list[str] = []
+        for item in priority:
+            section = str(item.get("issue_body_section", "")).strip()
+            artifact = str(item.get("artifact", "")).strip()
+            if section and issue_body_section == "保護設定変更許可リスト":
+                issue_body_section = section
+            if artifact:
+                artifacts.append(artifact)
+        if not artifacts:
+            artifacts = ["protected_config_allowlist.json"]
+        return cls(issue_body_section=issue_body_section, artifacts=artifacts)
+
+
+@dataclass(frozen=True, slots=True)
+class ProtectedConfigConfig:
+    default_policy: str = "deny"
+    allow_label: str = "allow-protected-config"
+    protected_paths: list[str] = field(default_factory=list)
+    allowlist_source: ProtectedConfigAllowlistSource = field(default_factory=ProtectedConfigAllowlistSource)
+
+    @classmethod
+    def from_dict(cls, payload: Any) -> ProtectedConfigConfig:
+        data = _require_mapping(payload, field_name="protected_config")
+        return cls(
+            default_policy=str(data.get("default", "deny")).strip() or "deny",
+            allow_label=str(data.get("allow_label", "allow-protected-config")).strip() or "allow-protected-config",
+            protected_paths=_require_list_of_strings(
+                data.get("protected_paths", []),
+                field_name="protected_config.protected_paths",
+            ),
+            allowlist_source=ProtectedConfigAllowlistSource.from_dict(data.get("allowlist_source", {}))
+            if "allowlist_source" in data
+            else ProtectedConfigAllowlistSource(),
         )
 
 
@@ -207,6 +277,91 @@ class ImplementationConfig:
             candidate_mode=candidate_mode,
             push_only_winner=bool(push_policy.get("push_only_winner", True)),
             cleanup_loser_local_branches=bool(push_policy.get("cleanup_loser_local_branches", True)),
+        )
+
+
+@dataclass(frozen=True, slots=True)
+class ReplanningConfig:
+    enabled: bool = True
+    auto_replan_on_reject_reasons: list[str] = field(default_factory=lambda: ["plan_misalignment", "scope_drift"])
+    max_replans_per_issue: int = 2
+    emit_replan_reason_artifact: bool = True
+    create_new_attempt_on_replan: bool = True
+
+    @classmethod
+    def from_dict(cls, payload: Any) -> ReplanningConfig:
+        data = _require_mapping(payload, field_name="replanning")
+        max_replans_per_issue = int(data.get("max_replans_per_issue", 2))
+        if max_replans_per_issue < 0:
+            raise WorkflowValidationError("replanning.max_replans_per_issue must be >= 0")
+        return cls(
+            enabled=bool(data.get("enabled", True)),
+            auto_replan_on_reject_reasons=_require_list_of_strings(
+                data.get("auto_replan_on_reject_reasons", ["plan_misalignment", "scope_drift"]),
+                field_name="replanning.auto_replan_on_reject_reasons",
+            ),
+            max_replans_per_issue=max_replans_per_issue,
+            emit_replan_reason_artifact=bool(data.get("emit_replan_reason_artifact", True)),
+            create_new_attempt_on_replan=bool(data.get("create_new_attempt_on_replan", True)),
+        )
+
+
+@dataclass(frozen=True, slots=True)
+class CompactionPolicyConfig:
+    turn_count_gte: int = 12
+    steer_count_gte: int = 2
+    repair_cycles_gte: int = 3
+
+    @classmethod
+    def from_dict(cls, payload: Any) -> CompactionPolicyConfig:
+        data = _require_mapping(payload, field_name="codex.compaction_policy")
+        return cls(
+            turn_count_gte=int(data.get("turn_count_gte", 12)),
+            steer_count_gte=int(data.get("steer_count_gte", 2)),
+            repair_cycles_gte=int(data.get("repair_cycles_gte", 3)),
+        )
+
+
+@dataclass(frozen=True, slots=True)
+class CodexConfig:
+    command: str = "codex app-server"
+    model: str = "gpt-5.4"
+    reasoning_effort: str = "medium"
+    summary: str = "concise"
+    approval_policy: str = "never"
+    thread_sandbox: str = "workspace-write"
+    writable_roots: list[str] = field(default_factory=list)
+    network_access: bool = False
+    turn_timeout_ms: int = 3_600_000
+    read_timeout_ms: int = 5_000
+    allow_turn_steer: bool = False
+    allow_thread_resume_same_run_only: bool = True
+    compaction_policy: CompactionPolicyConfig = field(default_factory=CompactionPolicyConfig)
+    service_name: str = "dev-bot"
+
+    @classmethod
+    def from_dict(cls, payload: Any) -> CodexConfig:
+        data = _require_mapping(payload, field_name="codex")
+        return cls(
+            command=str(data.get("command", "codex app-server")).strip() or "codex app-server",
+            model=str(data.get("model", "gpt-5.4")).strip() or "gpt-5.4",
+            reasoning_effort=str(data.get("reasoning_effort", "medium")).strip() or "medium",
+            summary=str(data.get("summary", "concise")).strip() or "concise",
+            approval_policy=str(data.get("approval_policy", "never")).strip() or "never",
+            thread_sandbox=str(data.get("thread_sandbox", "workspace-write")).strip() or "workspace-write",
+            writable_roots=_require_list_of_strings(
+                data.get("writable_roots", []),
+                field_name="codex.writable_roots",
+            ),
+            network_access=bool(data.get("network_access", False)),
+            turn_timeout_ms=int(data.get("turn_timeout_ms", 3_600_000)),
+            read_timeout_ms=int(data.get("read_timeout_ms", 5_000)),
+            allow_turn_steer=bool(data.get("allow_turn_steer", False)),
+            allow_thread_resume_same_run_only=bool(data.get("allow_thread_resume_same_run_only", True)),
+            compaction_policy=CompactionPolicyConfig.from_dict(data["compaction_policy"])
+            if "compaction_policy" in data
+            else CompactionPolicyConfig(),
+            service_name=str(data.get("service_name", "dev-bot")).strip() or "dev-bot",
         )
 
 
@@ -379,7 +534,10 @@ class IncidentBundleConfig:
 @dataclass(frozen=True, slots=True)
 class WorkflowConfig:
     planning: PlanningConfig | None = None
+    codex: CodexConfig | None = None
     implementation: ImplementationConfig | None = None
+    replanning: ReplanningConfig | None = None
+    protected_config: ProtectedConfigConfig | None = None
     review: ReviewConfig | None = None
     verification: VerificationConfig | None = None
     incident_bundle: IncidentBundleConfig | None = None
@@ -390,7 +548,12 @@ class WorkflowConfig:
     def from_dict(cls, payload: Any) -> WorkflowConfig:
         data = _require_mapping(payload, field_name="workflow")
         planning = PlanningConfig.from_dict(data["planning"]) if "planning" in data else None
+        codex = CodexConfig.from_dict(data["codex"]) if "codex" in data else None
         implementation = ImplementationConfig.from_dict(data["implementation"]) if "implementation" in data else None
+        replanning = ReplanningConfig.from_dict(data["replanning"]) if "replanning" in data else None
+        protected_config = (
+            ProtectedConfigConfig.from_dict(data["protected_config"]) if "protected_config" in data else None
+        )
         review = ReviewConfig.from_dict(data["review"]) if "review" in data else None
         verification = VerificationConfig.from_dict(data["verification"]) if "verification" in data else None
         incident_bundle = None
@@ -400,7 +563,10 @@ class WorkflowConfig:
         telemetry = TelemetryConfig.from_dict(data["telemetry"]) if "telemetry" in data else None
         return cls(
             planning=planning,
+            codex=codex,
             implementation=implementation,
+            replanning=replanning,
+            protected_config=protected_config,
             review=review,
             verification=verification,
             incident_bundle=incident_bundle,

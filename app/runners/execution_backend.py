@@ -11,6 +11,8 @@ class RunSpec:
     candidate_id: str
     cwd: str
     prompt: str
+    session_id: str = ""
+    session_strategy: str = "fresh"
     model: str = "gpt-5.4"
     service_name: str = "dev-bot"
     output_schema_name: str = "implementation_result_v1"
@@ -39,10 +41,12 @@ class RunArtifacts:
     mode: str
     implementation_result_path: str
     raw_event_log_path: str
+    session_id: str = ""
 
 
 class ExecutionBackend(Protocol):
     async def start_run(self, spec: RunSpec) -> RunHandle: ...
+    async def read_thread(self, thread_id: str) -> dict[str, Any]: ...
     async def steer(self, handle: RunHandle, message: str) -> None: ...
     async def interrupt(self, handle: RunHandle) -> None: ...
     async def resume_same_run(self, handle: RunHandle) -> RunHandle: ...

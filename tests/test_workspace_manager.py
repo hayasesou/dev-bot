@@ -153,3 +153,21 @@ class WorkspaceManagerTests(unittest.TestCase):
                     for cmd in manager.commands
                 )
             )
+
+    def test_prepare_attempt_candidate_workspace_uses_attempt_aware_branch_and_path(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            manager = StubWorkspaceManager(tmpdir)
+
+            result = manager.prepare_attempt_candidate_workspace(
+                "acme/api",
+                123,
+                attempt_id="att-002",
+                candidate_id="alt1",
+                issue_title="Add login timeout",
+            )
+
+            self.assertEqual("acme/api#123", result["workspace_key"])
+            self.assertIn("/acme/api/issue-123/exec/candidates/att-002/alt1/repo", result["workspace"])
+            self.assertEqual("agent/gh-123-add-login-timeout-att-002-alt1", result["branch_name"])
+            self.assertEqual("att-002", result["attempt_id"])
+            self.assertEqual("alt1", result["candidate_id"])

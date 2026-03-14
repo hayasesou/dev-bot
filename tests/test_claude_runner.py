@@ -117,3 +117,28 @@ class ClaudeRunnerReviewTests(unittest.TestCase):
         self.assertEqual(1, len(review["postable_findings"]))
         self.assertIn("Missing regression test", review["test_gaps"])
         self.assertIn("Regression in approval gate", review["risk_items"])
+
+    def test_judge_winner_tiebreak_returns_structured_payload(self) -> None:
+        runner = ClaudeRunner(api_key=None)
+
+        with patch.object(
+            runner.client,
+            "json_response",
+            return_value={
+                "winner_candidate_id": "alt1",
+                "summary": "alt1 keeps a narrower path to review",
+                "explanation": ["alt1 avoids discretionary changes outside the core fix"],
+            },
+        ):
+            payload = runner.judge_winner_tiebreak(
+                workspace=".",
+                plan={"goal": "fix auth"},
+                candidates=[
+                    {"candidate_id": "primary", "metrics": {"rank_tuple": [[0, 0, 0, 0], 0, 0, 0, 1, 0]}},
+                    {"candidate_id": "alt1", "metrics": {"rank_tuple": [[0, 0, 0, 0], 0, 0, 0, 1, 0]}},
+                ],
+                fallback_winner_candidate_id="primary",
+            )
+
+        self.assertEqual("alt1", payload["winner_candidate_id"])
+        self.assertIn("narrower", payload["summary"])

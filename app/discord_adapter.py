@@ -6,7 +6,7 @@ import traceback
 from datetime import UTC, datetime
 from functools import partial
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
 from app.logging_setup import get_logger
 
@@ -172,10 +172,12 @@ DERIVED_ARTIFACTS = (
     "pr.json",
     "workspace.json",
     "plan.json",
+    "plan_v2.json",
     "test_plan.json",
     "verification_plan.json",
     "candidate_decision.json",
     "committee_plan.json",
+    "committee_bundle.json",
     "committee_reports.json",
     "repo_profile.json",
     "planning_workspace.json",
@@ -193,6 +195,11 @@ DERIVED_ARTIFACTS = (
     "command_results.json",
 )
 
+PLANNING_CANONICAL_ARTIFACTS = (
+    "plan_v2.json",
+    "committee_bundle.json",
+)
+
 THREAD_LOCAL_STATUSES = {
     "collecting_requirements",
     "planning",
@@ -207,9 +214,11 @@ THREAD_LOCAL_STATUSES = {
 }
 
 MAX_DISCORD_MESSAGE_LENGTH = 2000
+DiscordClientBase = cast(type[Any], discord.Client)
+DiscordViewBase = cast(type[Any], discord.ui.View)
 
 
-class DevBotClient(discord.Client):
+class DevBotClient(DiscordClientBase):
     def __init__(self, settings: Settings, state_store: FileStateStore) -> None:
         intents = discord.Intents.default()
         intents.message_content = True
@@ -278,7 +287,7 @@ class DevBotClient(discord.Client):
             ("reject-plan", "計画を却下して修正要求状態に戻します", self.reject_plan_command, False),
             ("confirm", "互換コマンドです。/plan と同じく計画を作成します", self.confirm_command, True),
         ):
-            command = app_commands.Command(name=name, description=description, callback=callback)
+            command = cast(Any, app_commands.Command(name=name, description=description, callback=cast(Any, callback)))
             if needs_repo:
                 command.autocomplete("repo")(self.repo_autocomplete)
             self.tree.add_command(command)
@@ -296,10 +305,12 @@ class DevBotClient(discord.Client):
             ("why-failed", "直近の失敗理由を要約します", self.why_failed_command),
             ("budget", "直近 run の usage / cost を表示します", self.budget_command),
         ):
-            self.tree.add_command(app_commands.Command(name=name, description=description, callback=callback))
+            self.tree.add_command(
+                cast(Any, app_commands.Command(name=name, description=description, callback=cast(Any, callback)))
+            )
 
         if self.settings.discord_guild_id:
-            guild = discord.Object(id=int(self.settings.discord_guild_id))
+            guild = cast(Any, discord.Object)(id=int(self.settings.discord_guild_id))
             self.tree.copy_global_to(guild=guild)
             await self.tree.sync(guild=guild)
             return
@@ -394,10 +405,12 @@ class DevBotClient(discord.Client):
         for key, filename in (
             ("summary", "requirement_summary.json"),
             ("plan", "plan.json"),
+            ("plan_v2", "plan_v2.json"),
             ("test_plan", "test_plan.json"),
             ("verification_plan", "verification_plan.json"),
             ("candidate_decision", "candidate_decision.json"),
             ("committee_plan", "committee_plan.json"),
+            ("committee_bundle", "committee_bundle.json"),
             ("committee_reports", "committee_reports.json"),
             ("repo_profile", "repo_profile.json"),
             ("planning_workspace", "planning_workspace.json"),
@@ -406,6 +419,8 @@ class DevBotClient(discord.Client):
             payload = artifacts.get(key)
             if isinstance(payload, dict):
                 self.state_store.write_artifact(thread_id, filename, payload)
+                if filename in PLANNING_CANONICAL_ARTIFACTS:
+                    self.state_store.write_planning_artifact(thread_id, filename, payload)
 
     @staticmethod
     def _artifact_dict(payload: object) -> dict[str, Any]:
@@ -677,7 +692,7 @@ class DevBotClient(discord.Client):
                 "branch_name": "",
                 "base_branch": "",
             }
-            issue_meta = self.state_store.load_issue_meta(runtime_key)
+            issue_meta = self.state_store.load_issue_meta(str(runtime_key))
             repo_full_name = str(issue_meta.get("github_repo", "")).strip()
             issue_number = int(str(issue_meta.get("issue_number", "0")).strip() or 0)
             if repo_full_name and issue_number:
@@ -1494,15 +1509,19 @@ class DevBotClient(discord.Client):
             debug_recorder=record_debug,
         )
         candidate_decision = getattr(built, "candidate_decision", None) or {}
+        plan_v2 = getattr(built, "plan_v2", None) or {}
         committee_plan = getattr(built, "committee_plan", None) or {}
+        committee_bundle = getattr(built, "committee_bundle", None) or {}
         committee_reports = getattr(built, "committee_reports", None) or {}
         return {
             "repo_profile": built.repo_profile,
             "plan": built.plan,
+            "plan_v2": plan_v2,
             "test_plan": built.test_plan,
             "verification_plan": built.verification_plan,
             "candidate_decision": candidate_decision,
             "committee_plan": committee_plan,
+            "committee_bundle": committee_bundle,
             "committee_reports": committee_reports,
             "planning_workspace": planning_workspace,
             "planning_sessions": progress_state,
@@ -1700,17 +1719,17 @@ class DevBotClient(discord.Client):
         self.issue_scheduler._run_blocking = self._run_blocking
 
 
-class ApprovalView(discord.ui.View):
+class ApprovalView(DiscordViewBase):
     def __init__(self, client: DevBotClient) -> None:
         super().__init__(timeout=None)
         self.client = client
 
-    @discord.ui.button(label="Approve", style=discord.ButtonStyle.success, custom_id="devbot:approve")
+    @discord.ui.button(label="Approve", style=cast(Any, discord.ButtonStyle.success), custom_id="devbot:approve")
     async def approve(self, interaction: discord.Interaction, button: discord.ui.Button) -> None:
         del button
         await self.client._resolve_approval(interaction, approved=True)
 
-    @discord.ui.button(label="Reject", style=discord.ButtonStyle.danger, custom_id="devbot:reject")
+    @discord.ui.button(label="Reject", style=cast(Any, discord.ButtonStyle.danger), custom_id="devbot:reject")
     async def reject(self, interaction: discord.Interaction, button: discord.ui.Button) -> None:
         del button
         await self.client._resolve_approval(interaction, approved=False)

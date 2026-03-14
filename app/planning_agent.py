@@ -4,12 +4,13 @@ import json
 from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
+from types import SimpleNamespace
+from typing import Any, TypedDict, cast
 
 from app.agent_sdk_client import ClaudeAgentClient
 from app.config import Settings
 from app.contracts.artifact_models import PlanV2
-from app.contracts.workflow_schema import CommitteeRoleConfig, PlanningConfig
+from app.contracts.workflow_schema import CandidateModeTriggers, CommitteeRoleConfig, PlanningConfig
 from app.implementation.candidate_policy import CandidateDecision, decide_candidates
 from app.planning.committee import PlannerCommittee
 from app.planning.roles.constraint_checker import ConstraintChecker
@@ -34,20 +35,28 @@ READ_ONLY_TOOLS = [
 PLAN_SCHEMA: dict[str, Any] = {
     "type": "object",
     "properties": {
+        "version": {"type": "integer"},
         "goal": {"type": "string"},
         "scope": {"type": "array", "items": {"type": "string"}},
         "assumptions": {"type": "array", "items": {"type": "string"}},
         "candidate_files": {"type": "array", "items": {"type": "string"}},
+        "must_not_touch": {"type": "array", "items": {"type": "string"}},
+        "verification_focus": {"type": "array", "items": {"type": "string"}},
+        "exploration_required": {"type": "boolean"},
         "implementation_steps": {"type": "array", "items": {"type": "string"}},
         "verification_steps": {"type": "array", "items": {"type": "string"}},
         "risks": {"type": "array", "items": {"type": "string"}},
         "high_risk_changes": {"type": "array", "items": {"type": "string"}},
     },
     "required": [
+        "version",
         "goal",
         "scope",
         "assumptions",
         "candidate_files",
+        "must_not_touch",
+        "verification_focus",
+        "exploration_required",
         "implementation_steps",
         "verification_steps",
         "risks",
@@ -207,6 +216,8 @@ PLAN_SYSTEM_PROMPT = """あなたはソフトウェア開発の planning エー�
 - 未確定事項は assumptions または risks に残す
 - 変更対象ファイルは candidate_files として挙げる
 - migration や secrets 変更の可能性は risks に明記する
+- 変更禁止パスや契約ファイルは must_not_touch に列挙する
+- verification_focus には回帰させたくない観点を列挙する
 - 調査を始める宣言文や途中説明を書かない
 - 思考過程を書かない
 - ツールを使った後でも最終出力は schema に一致する JSON オブジェクトのみ
@@ -273,9 +284,17 @@ class PlanningArtifacts:
     plan: dict[str, Any]
     test_plan: dict[str, Any]
     verification_plan: dict[str, Any]
+    plan_v2: dict[str, Any] | None = None
     candidate_decision: dict[str, Any] | None = None
     committee_plan: dict[str, Any] | None = None
     committee_reports: dict[str, Any] | None = None
+    committee_bundle: dict[str, Any] | None = None
+
+
+class CandidateModeDecisionKwargs(TypedDict):
+    rework_count_gte: int
+    planner_confidence_lt: float
+    require_clear_design_branches: bool
 
 
 class PlanningAgent:
@@ -300,14 +319,43 @@ class PlanningAgent:
         planning_config = (
             workflow_definition.config.planning if workflow_definition and workflow_definition.config else None
         )
+        candidate_mode_triggers = self._candidate_mode_triggers(workflow_definition)
         if workflow_definition is not None and planning_config is not None and planning_config.mode == "committee":
-            return self._build_committee_artifacts(
-                workspace=workspace,
-                summary=summary,
-                repo_profile=repo_profile,
-                rework_count=rework_count,
-                planning_config=planning_config,
-            )
+            try:
+                return self._build_committee_artifacts(
+                    workspace=workspace,
+                    summary=summary,
+                    repo_profile=repo_profile,
+                    rework_count=rework_count,
+                    planning_config=planning_config,
+                    candidate_mode_triggers=candidate_mode_triggers,
+                )
+            except Exception:
+                if not self._allow_legacy_fallback(planning_config):
+                    raise
+        return self._build_legacy_artifacts(
+            workspace=workspace,
+            summary=summary,
+            repo_profile=repo_profile,
+            rework_count=rework_count,
+            planning_config=planning_config,
+            candidate_mode_triggers=candidate_mode_triggers,
+            progress_callback=progress_callback,
+            debug_recorder=debug_recorder,
+        )
+
+    def _build_legacy_artifacts(
+        self,
+        *,
+        workspace: str,
+        summary: dict[str, Any],
+        repo_profile: dict[str, Any],
+        rework_count: int,
+        planning_config: PlanningConfig | None,
+        candidate_mode_triggers: CandidateModeTriggers | None,
+        progress_callback: Callable[[dict[str, Any]], None] | None = None,
+        debug_recorder: Callable[[dict[str, Any]], None] | None = None,
+    ) -> PlanningArtifacts:
         client = ClaudeAgentClient(
             api_key=self.settings.anthropic_api_key,
             timeout_seconds=float(300),
@@ -332,7 +380,7 @@ class PlanningAgent:
             max_turns=4,
             allowed_tools=READ_ONLY_TOOLS,
             permission_mode="default",
-            setting_sources=[],
+            setting_sources=self._planning_setting_sources(planning_config),
             output_schema=PLAN_SCHEMA,
             prompt_kind="plan",
             debug_recorder=debug_recorder,
@@ -345,16 +393,35 @@ class PlanningAgent:
             repo_profile=repo_profile,
             repo_context=_build_test_plan_repo_context(workspace, repo_profile),
             plan=plan,
+            planning_config=planning_config,
             progress_callback=progress_callback,
             debug_recorder=debug_recorder,
         )
         verification_plan = build_verification_plan(workspace=workspace, repo_profile=repo_profile, plan=plan)
+        plan_v2 = self._legacy_plan_to_plan_v2(
+            summary=summary,
+            plan=plan,
+            test_plan=test_plan,
+            verification_plan=verification_plan,
+        )
+        candidate_decision = self._candidate_decision_from_plan_v2_json(
+            plan_v2=plan_v2,
+            rework_count=rework_count,
+            candidate_mode_triggers=candidate_mode_triggers,
+        )
         return PlanningArtifacts(
             repo_profile=repo_profile,
             plan=plan,
             test_plan=test_plan,
             verification_plan=verification_plan,
-            candidate_decision=_candidate_decision_to_json(CandidateDecision(enabled=False, candidate_ids=["primary"])),
+            plan_v2=plan_v2,
+            candidate_decision=_candidate_decision_to_json(candidate_decision),
+            committee_bundle={
+                "version": 1,
+                "mode": "legacy",
+                "plan_v2": plan_v2,
+                "committee_reports": {},
+            },
         )
 
     def _build_committee_artifacts(
@@ -365,6 +432,7 @@ class PlanningAgent:
         repo_profile: dict[str, Any],
         rework_count: int,
         planning_config: PlanningConfig | None,
+        candidate_mode_triggers: CandidateModeTriggers | None,
     ) -> PlanningArtifacts:
         committee = self._create_planner_committee(planning_config=planning_config)
         issue_ctx = _CommitteeIssueContext(
@@ -379,18 +447,31 @@ class PlanningAgent:
         plan = self._committee_plan_to_legacy(bundle.merged)
         test_plan = self._committee_test_plan_to_legacy(bundle.merged)
         verification_plan = build_verification_plan(workspace=workspace, repo_profile=repo_profile, plan=plan)
-        candidate_decision = decide_candidates(bundle.merged, rework_count)
+        candidate_decision = decide_candidates(
+            bundle.merged,
+            rework_count,
+            **self._candidate_mode_trigger_kwargs(candidate_mode_triggers),
+        )
+        committee_plan = _plan_v2_to_json(bundle.merged)
+        committee_reports = {
+            "repo": _to_jsonable(bundle.repo),
+            "risk": _to_jsonable(bundle.risk),
+            "constraint": _to_jsonable(bundle.constraint),
+        }
         return PlanningArtifacts(
             repo_profile=repo_profile,
             plan=plan,
             test_plan=test_plan,
             verification_plan=verification_plan,
+            plan_v2=committee_plan,
             candidate_decision=_candidate_decision_to_json(candidate_decision),
-            committee_plan=_plan_v2_to_json(bundle.merged),
-            committee_reports={
-                "repo": _to_jsonable(bundle.repo),
-                "risk": _to_jsonable(bundle.risk),
-                "constraint": _to_jsonable(bundle.constraint),
+            committee_plan=committee_plan,
+            committee_reports=committee_reports,
+            committee_bundle={
+                "version": 1,
+                "mode": "committee",
+                "plan_v2": committee_plan,
+                "committee_reports": committee_reports,
             },
         )
 
@@ -464,19 +545,80 @@ class PlanningAgent:
         if role_config and role_config.disallowed_tools:
             blocked = set(role_config.disallowed_tools)
             allowed_tools = [tool for tool in allowed_tools if tool not in blocked]
-        setting_sources = list(planning_config.settings_sources) if planning_config else ["project"]
+        setting_sources = self._planning_setting_sources(planning_config)
         return {
             "allowed_tools": allowed_tools,
             "setting_sources": setting_sources,
             "permission_mode": "default",
         }
 
+    def _planning_setting_sources(self, planning_config: PlanningConfig | None) -> list[str]:
+        if planning_config and planning_config.settings_sources:
+            return list(planning_config.settings_sources)
+        return ["project"]
+
+    def _allow_legacy_fallback(self, planning_config: PlanningConfig | None) -> bool:
+        if planning_config is None:
+            return True
+        fallback = getattr(planning_config, "legacy_fallback", None)
+        if fallback is None:
+            return False
+        return bool(getattr(fallback, "enabled", True)) and bool(
+            getattr(fallback, "use_only_on_committee_failure", True)
+        )
+
+    def _candidate_mode_triggers(self, workflow_definition: Any) -> CandidateModeTriggers | None:
+        if workflow_definition is None or getattr(workflow_definition, "config", None) is None:
+            return None
+        implementation = getattr(workflow_definition.config, "implementation", None)
+        candidate_mode = getattr(implementation, "candidate_mode", None) if implementation is not None else None
+        return getattr(candidate_mode, "triggers", None)
+
+    def _candidate_mode_trigger_kwargs(
+        self,
+        candidate_mode_triggers: CandidateModeTriggers | None,
+    ) -> CandidateModeDecisionKwargs:
+        if candidate_mode_triggers is None:
+            return {
+                "rework_count_gte": 1,
+                "planner_confidence_lt": 0.75,
+                "require_clear_design_branches": False,
+            }
+        return {
+            "rework_count_gte": int(getattr(candidate_mode_triggers, "rework_count_gte", 1)),
+            "planner_confidence_lt": float(getattr(candidate_mode_triggers, "planner_confidence_lt", 0.75)),
+            "require_clear_design_branches": bool(
+                getattr(candidate_mode_triggers, "require_clear_design_branches", False)
+            ),
+        }
+
+    def _candidate_decision_from_plan_v2_json(
+        self,
+        *,
+        plan_v2: dict[str, Any],
+        rework_count: int,
+        candidate_mode_triggers: CandidateModeTriggers | None,
+    ) -> CandidateDecision:
+        surrogate = SimpleNamespace(
+            planner_confidence=float(plan_v2.get("planner_confidence", 1.0) or 1.0),
+            design_branches=list(plan_v2.get("design_branches", [])),
+        )
+        return decide_candidates(
+            cast(PlanV2, surrogate),
+            rework_count,
+            **self._candidate_mode_trigger_kwargs(candidate_mode_triggers),
+        )
+
     def _committee_plan_to_legacy(self, plan_v2: PlanV2) -> dict[str, Any]:
         return {
+            "version": plan_v2.version,
             "goal": plan_v2.goal,
             "scope": [task.summary for task in plan_v2.tasks],
             "assumptions": list(plan_v2.constraints),
             "candidate_files": list(plan_v2.candidate_files),
+            "must_not_touch": list(plan_v2.must_not_touch),
+            "verification_focus": list(plan_v2.verification_focus),
+            "exploration_required": plan_v2.exploration_required,
             "implementation_steps": [task.summary for task in plan_v2.tasks],
             "verification_steps": [f"Validate {item.criterion}" for item in plan_v2.test_mapping],
             "risks": [item.risk for item in plan_v2.risks],
@@ -523,6 +665,71 @@ class PlanningAgent:
             ],
         }
 
+    def _legacy_plan_to_plan_v2(
+        self,
+        *,
+        summary: dict[str, Any],
+        plan: dict[str, Any],
+        test_plan: dict[str, Any],
+        verification_plan: dict[str, Any],
+    ) -> dict[str, Any]:
+        acceptance_criteria = [
+            str(item).strip() for item in summary.get("acceptance_criteria", []) if str(item).strip()
+        ]
+        candidate_files = [str(item).strip() for item in plan.get("candidate_files", []) if str(item).strip()]
+        implementation_steps = [str(item).strip() for item in plan.get("implementation_steps", []) if str(item).strip()]
+        high_risk_changes = [str(item).strip() for item in plan.get("high_risk_changes", []) if str(item).strip()]
+        test_targets = [str(item).strip() for item in test_plan.get("test_targets", []) if str(item).strip()]
+        verification_profile = str(verification_plan.get("profile", "")).strip()
+        if not verification_profile:
+            raw_checks = verification_plan.get("required_checks", [])
+            if isinstance(raw_checks, list) and raw_checks:
+                verification_profile = "generated"
+        return {
+            "version": int(plan.get("version", 2) or 2),
+            "goal": str(plan.get("goal", "")).strip(),
+            "acceptance_criteria": acceptance_criteria,
+            "out_of_scope": [str(item).strip() for item in summary.get("out_of_scope", []) if str(item).strip()],
+            "constraints": [str(item).strip() for item in plan.get("assumptions", []) if str(item).strip()],
+            "candidate_files": candidate_files,
+            "must_not_touch": [str(item).strip() for item in plan.get("must_not_touch", []) if str(item).strip()],
+            "verification_focus": [
+                str(item).strip() for item in plan.get("verification_focus", []) if str(item).strip()
+            ],
+            "exploration_required": bool(plan.get("exploration_required", False)),
+            "tasks": [
+                {"id": f"T{index:02d}", "summary": step, "files": list(candidate_files), "done_when": ""}
+                for index, step in enumerate(implementation_steps, start=1)
+            ],
+            "design_branches": [
+                {
+                    "id": "primary",
+                    "summary": "default implementation path",
+                    "pros": [],
+                    "cons": [],
+                    "recommended": True,
+                },
+                *[
+                    {
+                        "id": f"alt{index}",
+                        "summary": item,
+                        "pros": [],
+                        "cons": [],
+                        "recommended": False,
+                    }
+                    for index, item in enumerate(high_risk_changes, start=1)
+                ],
+            ],
+            "risks": [
+                {"risk": str(item).strip(), "mitigation": ""} for item in plan.get("risks", []) if str(item).strip()
+            ],
+            "test_mapping": [
+                {"criterion": criterion, "tests": list(test_targets)} for criterion in acceptance_criteria
+            ],
+            "verification_profile": verification_profile,
+            "planner_confidence": 1.0,
+        }
+
     def _has_plannable_summary(self, summary: dict[str, Any]) -> bool:
         goal = str(summary.get("goal", "")).strip()
         in_scope = summary.get("in_scope", [])
@@ -544,6 +751,7 @@ class PlanningAgent:
         repo_profile: dict[str, Any],
         repo_context: str,
         plan: dict[str, Any],
+        planning_config: PlanningConfig | None = None,
         progress_callback: Callable[[dict[str, Any]], None] | None = None,
         debug_recorder: Callable[[dict[str, Any]], None] | None = None,
     ) -> dict[str, Any]:
@@ -575,7 +783,7 @@ class PlanningAgent:
             max_turns=4,
             allowed_tools=READ_ONLY_TOOLS,
             permission_mode="default",
-            setting_sources=[],
+            setting_sources=self._planning_setting_sources(planning_config),
             output_schema=TEST_PLAN_OVERVIEW_SCHEMA,
             prompt_kind="test_plan",
             debug_recorder=debug_recorder,
@@ -622,7 +830,7 @@ class PlanningAgent:
                 max_turns=4,
                 allowed_tools=READ_ONLY_TOOLS,
                 permission_mode="default",
-                setting_sources=[],
+                setting_sources=self._planning_setting_sources(planning_config),
                 output_schema=TEST_PLAN_AC_SCHEMA,
                 prompt_kind="test_plan",
                 debug_recorder=debug_recorder,
@@ -789,7 +997,7 @@ def _to_jsonable(value: Any) -> dict[str, Any]:
     from dataclasses import asdict, is_dataclass
 
     if is_dataclass(value):
-        data = asdict(value)
+        data = asdict(cast(Any, value))
         return data if isinstance(data, dict) else {"value": data}
     if isinstance(value, dict):
         return value
@@ -798,11 +1006,15 @@ def _to_jsonable(value: Any) -> dict[str, Any]:
 
 def _plan_v2_to_json(plan_v2: PlanV2) -> dict[str, Any]:
     return {
+        "version": plan_v2.version,
         "goal": plan_v2.goal,
         "acceptance_criteria": list(plan_v2.acceptance_criteria),
         "out_of_scope": list(plan_v2.out_of_scope),
         "constraints": list(plan_v2.constraints),
         "candidate_files": list(plan_v2.candidate_files),
+        "must_not_touch": list(plan_v2.must_not_touch),
+        "verification_focus": list(plan_v2.verification_focus),
+        "exploration_required": plan_v2.exploration_required,
         "tasks": [
             {"id": task.id, "summary": task.summary, "files": list(task.files), "done_when": task.done_when}
             for task in plan_v2.tasks

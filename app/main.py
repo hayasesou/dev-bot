@@ -1,6 +1,8 @@
 from __future__ import annotations
 
-from app.config import ValidationError, load_settings, validate_settings
+from pydantic import ValidationError
+
+from app.config import load_settings, validate_settings
 from app.github_client import GitHubIssueClient
 from app.logging_setup import configure_logging, get_logger
 

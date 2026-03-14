@@ -140,3 +140,61 @@ class FileStateStoreTests(unittest.TestCase):
 
         with self.assertRaises(RuntimeError):
             self.store.bind_thread(1, "owner/repo#99")
+
+    def test_create_attempt_generates_sequential_attempt_ids(self) -> None:
+        issue_key = self.store.bind_issue(1, "owner/repo", 42)
+
+        first = self.store.create_attempt(issue_key)
+        second = self.store.create_attempt(issue_key)
+
+        self.assertEqual("att-001", first)
+        self.assertEqual("att-002", second)
+        self.assertEqual("att-002", self.store.current_attempt_id(issue_key))
+        self.assertEqual(2, self.store.load_meta(issue_key)["attempt_count"])
+
+    def test_candidate_dir_is_namespaced_by_attempt_and_candidate(self) -> None:
+        issue_key = self.store.bind_issue(1, "owner/repo", 42)
+        attempt_id = self.store.create_attempt(issue_key)
+
+        path = self.store.candidate_dir(issue_key, attempt_id, "alt1")
+
+        self.assertEqual(
+            self.store.issue_dir(issue_key) / "attempts" / attempt_id / "candidates" / "alt1",
+            path,
+        )
+
+    def test_write_planning_artifact_uses_issue_planning_namespace(self) -> None:
+        issue_key = self.store.bind_issue(1, "owner/repo", 42)
+
+        self.store.write_planning_artifact(issue_key, "plan_v2.json", {"version": 2})
+
+        path = self.store.issue_dir(issue_key) / "planning" / "plan_v2.json"
+        self.assertEqual({"version": 2}, json.loads(path.read_text(encoding="utf-8")))
+
+    def test_promote_candidate_to_views_copies_candidate_artifacts(self) -> None:
+        issue_key = self.store.bind_issue(1, "owner/repo", 42)
+        attempt_id = self.store.create_attempt(issue_key)
+        self.store.write_candidate_artifact(
+            issue_key,
+            attempt_id,
+            "alt1",
+            "verification_result.json",
+            {"status": "success", "hard_checks_pass": True},
+        )
+        self.store.write_candidate_artifact(
+            issue_key,
+            attempt_id,
+            "alt1",
+            "verification.json",
+            {"status": "pass"},
+        )
+
+        self.store.promote_candidate_to_views(issue_key, attempt_id, "alt1")
+
+        self.assertEqual({"status": "pass"}, self.store.load_artifact(issue_key, "verification.json"))
+        self.assertEqual(
+            {"status": "success", "hard_checks_pass": True},
+            self.store.load_artifact(issue_key, "verification_result.json"),
+        )
+        views_path = self.store.issue_dir(issue_key) / "views" / "verification.json"
+        self.assertEqual({"status": "pass"}, json.loads(views_path.read_text(encoding="utf-8")))

@@ -42,11 +42,15 @@ class PlanMerger(JsonRoleRunner):
     OUTPUT_SCHEMA: ClassVar[dict] = {
         "type": "object",
         "properties": {
+            "version": {"type": "integer"},
             "goal": {"type": "string"},
             "acceptance_criteria": {"type": "array", "items": {"type": "string"}},
             "out_of_scope": {"type": "array", "items": {"type": "string"}},
             "constraints": {"type": "array", "items": {"type": "string"}},
             "candidate_files": {"type": "array", "items": {"type": "string"}},
+            "must_not_touch": {"type": "array", "items": {"type": "string"}},
+            "verification_focus": {"type": "array", "items": {"type": "string"}},
+            "exploration_required": {"type": "boolean"},
             "tasks": {
                 "type": "array",
                 "items": {
@@ -82,11 +86,15 @@ class PlanMerger(JsonRoleRunner):
             "planner_confidence": {"type": "number"},
         },
         "required": [
+            "version",
             "goal",
             "acceptance_criteria",
             "out_of_scope",
             "constraints",
             "candidate_files",
+            "must_not_touch",
+            "verification_focus",
+            "exploration_required",
             "tasks",
             "design_branches",
             "risks",
@@ -107,6 +115,8 @@ class PlanMerger(JsonRoleRunner):
             f"Constraint checker output:\n{merged_input['constraint_out']}\n\n"
             "Task:\n"
             "- produce the canonical implementation plan\n"
+            "- carry protected paths into must_not_touch\n"
+            "- include verification_focus for regression-sensitive areas\n"
             "- include design_branches\n"
             "- include planner_confidence\n"
             "Return JSON only."
@@ -118,11 +128,15 @@ class PlanMerger(JsonRoleRunner):
             prompt_kind="planner_merger",
         )
         return PlanV2(
+            version=int(payload["version"]),
             goal=payload["goal"],
             acceptance_criteria=list(payload["acceptance_criteria"]),
             out_of_scope=list(payload["out_of_scope"]),
             constraints=list(payload["constraints"]),
             candidate_files=list(payload["candidate_files"]),
+            must_not_touch=list(payload["must_not_touch"]),
+            verification_focus=list(payload["verification_focus"]),
+            exploration_required=bool(payload["exploration_required"]),
             tasks=[PlanTask(**item) for item in payload["tasks"]],
             design_branches=[DesignBranch(**item) for item in payload["design_branches"]],
             risks=[RiskItem(**item) for item in payload["risks"]],

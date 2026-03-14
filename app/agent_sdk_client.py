@@ -9,7 +9,7 @@ import subprocess
 import threading
 from dataclasses import dataclass
 from datetime import UTC, datetime
-from typing import Any
+from typing import Any, cast
 
 
 @dataclass(frozen=True)
@@ -981,18 +981,18 @@ def _build_options(
     options = ClaudeAgentOptions(
         tools=[] if allowed_tools == [] else None,
         allowed_tools=allowed_tools or [],
-        system_prompt=system,
+        system_prompt=cast(Any, system),
         cwd=cwd,
         max_turns=max_turns,
-        permission_mode=permission_mode,
-        setting_sources=setting_sources,
+        permission_mode=cast(Any, permission_mode),
+        setting_sources=cast(Any, setting_sources),
         output_format={"type": "json_schema", "schema": output_schema} if output_schema is not None else None,
         cli_path=cli_path,
         env=env,
         extra_args={"debug-to-stderr": None},
         max_buffer_size=max_buffer_size,
         stderr=stderr_lines.append,
-        hooks=hooks,
+        hooks=cast(Any, hooks),
         agents=agents,
     )
     return options, stderr_lines

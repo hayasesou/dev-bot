@@ -1,14 +1,14 @@
 from __future__ import annotations
 
 from dataclasses import asdict, is_dataclass
-from typing import Any
+from typing import Any, cast
 
 from app.agent_sdk_client import ClaudeAgentClient
 
 
 def _normalize_payload(value: Any) -> Any:
     if is_dataclass(value):
-        return asdict(value)
+        return asdict(cast(Any, value))
     return value
 
 

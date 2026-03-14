@@ -1,13 +1,14 @@
 {
   "success": true,
   "state": "Human Review",
+  "failure_type": "",
   "summary": [
-    "Connected CodexRunner to the ExecutionBackend abstraction instead of keeping app-server orchestration entirely inline.",
-    "Expanded CodexAppServerBackend so it tracks turn completion, structured output, summaries, raw event logs, and returns runner-usable artifacts.",
-    "Kept the existing CodexRunner result shape while writing implementation_result.json and changed_files.json from backend-collected outputs."
+    "Candidate mode trigger thresholds now follow WORKFLOW-driven values for rework count, planner confidence, and require_clear_design_branches.",
+    "Legacy planning fallback now computes candidate_decision from the generated plan instead of always forcing primary-only execution.",
+    "Pipeline and Codex runner now propagate allow_thread_resume_same_run_only from workflow config into RunSpec.",
+    "Verification planning now includes fast-repair profiles and checks, and the pipeline persists repair_feedback plus split review artifacts.",
+    "Codex rollover now reads thread state via app-server thread/read and stores session snapshots in checkpoint and handoff artifacts.",
+    "Repository-defined verification passed: ruff format, ruff check, pyright, and full `uv run python -m pytest tests -q`."
   ],
-  "risks": [
-    "Candidate mode and turn/steer are still not wired into the outer pipeline control flow; the backend now supports the primitives but the orchestration path still uses single-writer execution.",
-    "lint and typecheck were not rerun for this scoped runtime change."
-  ]
+  "risks": []
 }

@@ -105,7 +105,9 @@ class FileStateStore:
         artifacts_dir = self.execution_artifacts_dir(entity_key, run_id)
         artifacts_dir.mkdir(parents=True, exist_ok=True)
         meta = self.load_meta(entity_key)
-        attempt_count = int(meta.get("attempt_count", 0)) + 1
+        attempt_count = int(meta.get("attempt_count", 0))
+        if not (_is_issue_key(entity_key) and (self.issue_dir(entity_key) / "current_attempt.txt").exists()):
+            attempt_count += 1
         self.update_meta(entity_key, current_run_id=run_id, attempt_count=attempt_count)
         payload = {
             "run_id": run_id,
@@ -116,8 +118,36 @@ class FileStateStore:
         self._write_json(self.execution_run_dir(entity_key, run_id) / "meta.json", payload)
         return run_id
 
+    def create_attempt(self, identifier: str | int) -> str:
+        entity_key = self._resolve_entity_key(identifier)
+        current = self.current_attempt_id(entity_key)
+        next_index = 1
+        if current.startswith("att-"):
+            try:
+                next_index = int(current.removeprefix("att-")) + 1
+            except ValueError:
+                next_index = 1
+        attempt_id = f"att-{next_index:03d}"
+        path = self.entity_dir(entity_key) / "current_attempt.txt"
+        path.write_text(attempt_id, encoding="utf-8")
+        self.attempt_dir(entity_key, attempt_id).mkdir(parents=True, exist_ok=True)
+        meta = self.load_meta(entity_key)
+        self.update_meta(
+            entity_key,
+            current_attempt_id=attempt_id,
+            attempt_count=max(int(meta.get("attempt_count", 0)), next_index),
+        )
+        return attempt_id
+
     def current_run_id(self, identifier: str | int) -> str:
         return str(self.load_meta(identifier).get("current_run_id", ""))
+
+    def current_attempt_id(self, identifier: str | int) -> str:
+        entity_key = self._resolve_entity_key(identifier)
+        path = self.entity_dir(entity_key) / "current_attempt.txt"
+        if path.exists():
+            return path.read_text(encoding="utf-8").strip()
+        return str(self.load_meta(entity_key).get("current_attempt_id", "")).strip()
 
     def draft_dir(self, thread_id: int | str) -> Path:
         return self.drafts_root / str(thread_id)
@@ -127,6 +157,18 @@ class FileStateStore:
 
     def issue_latest_dir(self, issue_key: str) -> Path:
         return self.issue_dir(issue_key) / "latest"
+
+    def planning_dir(self, identifier: str | int) -> Path:
+        entity_key = self._resolve_entity_key(identifier)
+        path = self.issue_dir(entity_key) / "planning"
+        path.mkdir(parents=True, exist_ok=True)
+        return path
+
+    def views_dir(self, identifier: str | int) -> Path:
+        entity_key = self._resolve_entity_key(identifier)
+        path = self.issue_dir(entity_key) / "views"
+        path.mkdir(parents=True, exist_ok=True)
+        return path
 
     def entity_dir(self, identifier: str | int) -> Path:
         entity_key = self._resolve_entity_key(identifier)
@@ -161,6 +203,20 @@ class FileStateStore:
 
     def execution_artifacts_dir(self, identifier: str | int, run_id: str | None = None) -> Path:
         return self.execution_run_dir(identifier, run_id) / "artifacts"
+
+    def attempt_dir(self, identifier: str | int, attempt_id: str | None = None) -> Path:
+        entity_key = self._resolve_entity_key(identifier)
+        resolved_attempt_id = attempt_id or self.current_attempt_id(entity_key)
+        return self.entity_dir(entity_key) / "attempts" / resolved_attempt_id
+
+    def attempt_artifacts_dir(self, identifier: str | int, attempt_id: str | None = None) -> Path:
+        return self.attempt_dir(identifier, attempt_id) / "artifacts"
+
+    def candidate_dir(self, identifier: str | int, attempt_id: str, candidate_id: str) -> Path:
+        return self.attempt_dir(identifier, attempt_id) / "candidates" / candidate_id
+
+    def candidate_artifacts_dir(self, identifier: str | int, attempt_id: str, candidate_id: str) -> Path:
+        return self.candidate_dir(identifier, attempt_id, candidate_id) / "artifacts"
 
     def append_message(self, identifier: str | int, role: str, content: str) -> None:
         entity_dir = self.entity_dir(identifier)
@@ -318,6 +374,69 @@ class FileStateStore:
         self._write_json(artifacts_dir / filename, payload)
         self.write_artifact(identifier, filename, payload)
 
+    def write_attempt_artifact(self, identifier: str | int, attempt_id: str, filename: str, payload: object) -> None:
+        target_dir = self.attempt_artifacts_dir(identifier, attempt_id)
+        target_dir.mkdir(parents=True, exist_ok=True)
+        self._write_json(target_dir / filename, payload)
+
+    def write_planning_artifact(self, identifier: str | int, filename: str, payload: object) -> None:
+        self._write_json(self.planning_dir(identifier) / filename, payload)
+
+    def write_issue_artifact(self, identifier: str | int, filename: str, payload: object) -> None:
+        self.write_artifact(identifier, filename, payload)
+
+    def write_candidate_artifact(
+        self,
+        identifier: str | int,
+        attempt_id: str,
+        candidate_id: str,
+        filename: str,
+        payload: object,
+    ) -> None:
+        target_dir = self.candidate_artifacts_dir(identifier, attempt_id, candidate_id)
+        target_dir.mkdir(parents=True, exist_ok=True)
+        self._write_json(target_dir / filename, payload)
+
+    def load_attempt_artifact(self, identifier: str | int, attempt_id: str, filename: str) -> object:
+        path = self.attempt_artifacts_dir(identifier, attempt_id) / filename
+        try:
+            return json.loads(path.read_text(encoding="utf-8"))
+        except FileNotFoundError:
+            return {}
+
+    def load_planning_artifact(self, identifier: str | int, filename: str) -> object:
+        path = self.planning_dir(identifier) / filename
+        try:
+            return json.loads(path.read_text(encoding="utf-8"))
+        except FileNotFoundError:
+            return {}
+
+    def load_candidate_artifact(
+        self,
+        identifier: str | int,
+        attempt_id: str,
+        candidate_id: str,
+        filename: str,
+    ) -> object:
+        path = self.candidate_artifacts_dir(identifier, attempt_id, candidate_id) / filename
+        try:
+            return json.loads(path.read_text(encoding="utf-8"))
+        except FileNotFoundError:
+            return {}
+
+    def promote_candidate_to_views(self, identifier: str | int, attempt_id: str, candidate_id: str) -> None:
+        candidate_root = self.candidate_dir(identifier, attempt_id, candidate_id)
+        views_dir = self.views_dir(identifier)
+        for path in sorted(candidate_root.glob("*.json")):
+            payload = json.loads(path.read_text(encoding="utf-8"))
+            self._write_json(views_dir / path.name, payload)
+            self.write_artifact(identifier, path.name, payload)
+        artifacts_dir = self.candidate_artifacts_dir(identifier, attempt_id, candidate_id)
+        for path in sorted(artifacts_dir.glob("*.json")):
+            payload = json.loads(path.read_text(encoding="utf-8"))
+            self._write_json(views_dir / path.name, payload)
+            self.write_artifact(identifier, path.name, payload)
+
     def record_failure(
         self,
         identifier: str | int,
@@ -422,9 +541,10 @@ class FileStateStore:
 
     def load_execution_artifact(self, identifier: str | int, filename: str, run_id: str | None = None) -> object:
         path = self.execution_artifacts_dir(identifier, run_id) / filename
-        if not path.exists():
+        try:
+            return json.loads(path.read_text(encoding="utf-8"))
+        except FileNotFoundError:
             return {}
-        return json.loads(path.read_text(encoding="utf-8"))
 
     def _promote_draft_artifacts(self, thread_id: int, issue_key: str) -> None:
         draft_dir = self.draft_dir(thread_id)

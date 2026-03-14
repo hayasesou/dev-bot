@@ -153,6 +153,23 @@ class DiscordSchedulerTests(unittest.TestCase):
         self.assertEqual(42, self.state_store.load_artifact("owner/repo#42", "issue.json")["number"])
         self.assertEqual({}, self.state_store.load_artifact("owner/repo#42", "plan.json"))
 
+    def test_persist_artifacts_writes_canonical_planning_views(self) -> None:
+        self.state_store.create_run(thread_id=1, parent_message_id=10, channel_id=20)
+
+        self.client._persist_artifacts(
+            1,
+            {
+                "plan": {"goal": "legacy"},
+                "plan_v2": {"version": 2, "goal": "canonical"},
+                "committee_bundle": {"version": 1, "mode": "committee"},
+            },
+        )
+
+        self.assertEqual("legacy", self.state_store.load_artifact(1, "plan.json")["goal"])
+        self.assertEqual("canonical", self.state_store.load_artifact(1, "plan_v2.json")["goal"])
+        self.assertEqual("canonical", self.state_store.load_planning_artifact(1, "plan_v2.json")["goal"])
+        self.assertEqual("committee", self.state_store.load_planning_artifact(1, "committee_bundle.json")["mode"])
+
 
 class _FakeThread:
     def __init__(self, thread_id: int) -> None:
@@ -1387,6 +1404,7 @@ class DiscordSchedulerAsyncTests(unittest.IsolatedAsyncioTestCase):
         self.state_store.write_artifact(321, "requirement_summary.json", {"goal": "ship"})
         self.state_store.write_artifact(321, "plan.json", {"steps": ["one"]})
         self.state_store.write_artifact(321, "test_plan.json", {"checks": ["tests"]})
+        self.state_store.write_artifact(321, "verification_plan.json", {"required_checks": []})
         self.client.process_registry.register(issue_key, "run-1", pid=999999, runner_type="codex")
         enqueue_mock = AsyncMock(return_value=True)
         self.client.orchestrator.enqueue = enqueue_mock  # type: ignore[method-assign]
@@ -1425,6 +1443,7 @@ class DiscordSchedulerAsyncTests(unittest.IsolatedAsyncioTestCase):
         self.state_store.write_artifact(321, "requirement_summary.json", {"goal": "ship"})
         self.state_store.write_artifact(321, "plan.json", {"steps": ["one"]})
         self.state_store.write_artifact(321, "test_plan.json", {"checks": ["tests"]})
+        self.state_store.write_artifact(321, "verification_plan.json", {"required_checks": []})
         enqueue_mock = AsyncMock(return_value=True)
         self.client.orchestrator.enqueue = enqueue_mock  # type: ignore[method-assign]
 

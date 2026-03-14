@@ -37,11 +37,21 @@ class IssueSchedulerPlanningArtifactsTests(unittest.TestCase):
 
         self.assertFalse(self.scheduler.has_planning_artifacts(thread_id))
 
-    def test_has_planning_artifacts_allows_missing_recommended_artifacts(self) -> None:
+    def test_has_planning_artifacts_requires_verification_plan(self) -> None:
         thread_id = 456
         self.state_store.create_run(thread_id=thread_id, parent_message_id=1, channel_id=2)
         self.state_store.write_artifact(thread_id, "requirement_summary.json", {"goal": "ship"})
         self.state_store.write_artifact(thread_id, "plan.json", {"steps": ["one"]})
         self.state_store.write_artifact(thread_id, "test_plan.json", {"checks": ["tests"]})
+
+        self.assertFalse(self.scheduler.has_planning_artifacts(thread_id))
+
+    def test_has_planning_artifacts_accepts_full_required_set(self) -> None:
+        thread_id = 789
+        self.state_store.create_run(thread_id=thread_id, parent_message_id=1, channel_id=2)
+        self.state_store.write_artifact(thread_id, "requirement_summary.json", {"goal": "ship"})
+        self.state_store.write_artifact(thread_id, "plan.json", {"steps": ["one"]})
+        self.state_store.write_artifact(thread_id, "test_plan.json", {"checks": ["tests"]})
+        self.state_store.write_artifact(thread_id, "verification_plan.json", {"profile": "python-basic"})
 
         self.assertTrue(self.scheduler.has_planning_artifacts(thread_id))

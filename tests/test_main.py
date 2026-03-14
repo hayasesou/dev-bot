@@ -35,6 +35,7 @@ class MainModuleTests(unittest.TestCase):
             patch.object(
                 module.GitHubIssueClient, "preflight", return_value={"ok": True, "repo_count": 0, "sample_repos": []}
             ),
+            patch("app.discord_adapter.build_client", side_effect=RuntimeError("discord.py is not installed")),
             self.assertLogs("app.main", level=logging.ERROR) as cm,
         ):
             result = module.main()

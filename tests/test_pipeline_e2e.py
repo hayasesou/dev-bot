@@ -6,11 +6,12 @@ import asyncio
 import tempfile
 import unittest
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any
 from unittest.mock import MagicMock, patch
 
 from app.approvals import ApprovalCoordinator
-from app.pipeline import DevelopmentPipeline
+from app.pipeline import CandidateExecutionResult, DevelopmentPipeline
 from app.process_registry import ProcessRegistry
 from app.runners.codex_runner import CodexRunResult
 from app.state_store import FileStateStore
@@ -30,13 +31,19 @@ def _make_workspace_info(workspace: str) -> dict[str, Any]:
     }
 
 
-def _make_codex_result(returncode: int = 0, stdout_path: str = "/dev/null", mode: str = "app-server") -> CodexRunResult:
+def _make_codex_result(
+    returncode: int = 0,
+    stdout_path: str = "/dev/null",
+    mode: str = "app-server",
+    session_id: str = "thread_primary",
+) -> CodexRunResult:
     return CodexRunResult(
         returncode=returncode,
         stdout_path=stdout_path,
         changed_files=["file.py"],
         summary="done",
         mode=mode,
+        session_id=session_id,
     )
 
 
@@ -288,6 +295,90 @@ class TestFullSuccessPath(PipelineE2EBase):
         meta = self.state_store.load_meta(ISSUE_KEY)
         self.assertEqual(meta.get("status"), "Human Review")
         self.assertEqual("headsha123", self.state_store.load_artifact(ISSUE_KEY, "pr.json")["head_sha"])
+        self.assertEqual(
+            "completed", self.state_store.load_attempt_artifact(ISSUE_KEY, "att-001", "attempt_manifest.json")["status"]
+        )
+        self.assertEqual(
+            "ready",
+            self.state_store.load_attempt_artifact(ISSUE_KEY, "att-001", "attempt_manifest.json")["trigger"],
+        )
+        self.assertEqual(
+            1,
+            self.state_store.load_attempt_artifact(ISSUE_KEY, "att-001", "scope_contract.json")["version"],
+        )
+        self.assertTrue(self.state_store.load_attempt_artifact(ISSUE_KEY, "att-001", "proof_result.json")["complete"])
+        self.assertEqual(
+            "primary",
+            self.state_store.load_attempt_artifact(ISSUE_KEY, "att-001", "final_attempt_summary.json")[
+                "winner_candidate_id"
+            ],
+        )
+        self.assertIsInstance(
+            self.state_store.load_attempt_artifact(ISSUE_KEY, "att-001", "effective_workflow.json"),
+            dict,
+        )
+        self.assertEqual(
+            "approve",
+            self.state_store.load_candidate_artifact(ISSUE_KEY, "att-001", "primary", "latest_review_delta.json")[
+                "decision"
+            ],
+        )
+        self.assertFalse(
+            self.state_store.load_candidate_artifact(ISSUE_KEY, "att-001", "primary", "repair_instructions.json")[
+                "applicable"
+            ]
+        )
+        self.assertEqual(
+            "candidate_complete",
+            self.state_store.load_candidate_artifact(ISSUE_KEY, "att-001", "primary", "session_checkpoint.json")[
+                "last_completed_phase"
+            ],
+        )
+        self.assertEqual(
+            "thread_primary",
+            self.state_store.load_candidate_artifact(ISSUE_KEY, "att-001", "primary", "session_checkpoint.json")[
+                "session_id"
+            ],
+        )
+        self.assertEqual(
+            "thread_primary",
+            self.state_store.load_candidate_artifact(ISSUE_KEY, "att-001", "primary", "candidate_manifest.json")[
+                "session_id"
+            ],
+        )
+        self.assertEqual(
+            "approve",
+            self.state_store.load_candidate_artifact(ISSUE_KEY, "att-001", "primary", "review_summary.json")[
+                "decision"
+            ],
+        )
+        self.assertEqual(
+            "approve",
+            self.state_store.load_candidate_artifact(ISSUE_KEY, "att-001", "primary", "review_decision.json")[
+                "decision"
+            ],
+        )
+        self.assertNotIn(
+            "decision",
+            self.state_store.load_candidate_artifact(ISSUE_KEY, "att-001", "primary", "review_findings.json"),
+        )
+        self.assertEqual(
+            [],
+            self.state_store.load_candidate_artifact(ISSUE_KEY, "att-001", "primary", "postable_findings.json")[
+                "findings"
+            ],
+        )
+        self.assertFalse(
+            self.state_store.load_candidate_artifact(ISSUE_KEY, "att-001", "primary", "repair_feedback.json")[
+                "applicable"
+            ],
+        )
+        self.assertEqual(
+            ["all good"],
+            self.state_store.load_candidate_artifact(ISSUE_KEY, "att-001", "primary", "latest_repair_feedback.json")[
+                "notes"
+            ],
+        )
         self.github_client.ready_pull_request_for_review.assert_called_with("owner/repo", 99)
         self.assertFalse(self.state_store.load_artifact(ISSUE_KEY, "pr.json")["draft"])
 
@@ -362,6 +453,460 @@ class TestFullSuccessPath(PipelineE2EBase):
                 issue=make_test_issue(),
             )
         self.adapter.assert_message_order(THREAD_ID, ["run を開始", "Codex 実装が完了", "draft PR"])
+
+    async def test_candidate_mode_promotes_winner_branch(self) -> None:
+        alt_workspace = tempfile.mkdtemp()
+        self.state_store.write_artifact(
+            THREAD_ID,
+            "candidate_decision.json",
+            {"enabled": True, "candidate_ids": ["primary", "alt1"]},
+        )
+
+        def _prepare_candidate(**kwargs: Any) -> dict[str, Any]:
+            if kwargs["candidate_id"] == "primary":
+                return _make_workspace_info(self.workspace_dir)
+            return {
+                "workspace": alt_workspace,
+                "branch_name": "agent/gh-1-test-att-001-alt1",
+                "base_branch": "main",
+                "workspace_key": "owner/repo#1",
+                "workspace_root": alt_workspace,
+            }
+
+        def _codex_run(*args, **kwargs):
+            run_identity = kwargs.get("run_identity")
+            candidate_id = getattr(run_identity, "candidate_id", "primary")
+            workspace = kwargs["workspace"]
+            log_path = Path(workspace) / f"{candidate_id}.log"
+            log_path.write_text(f"{candidate_id} log\n", encoding="utf-8")
+            artifacts_dir = Path(kwargs["run_dir"]) / "artifacts"
+            artifacts_dir.mkdir(parents=True, exist_ok=True)
+            (artifacts_dir / "implementation_result.json").write_text(
+                f'{{"candidate_id":"{candidate_id}","summary":"ok","changed_files":["file.py"]}}',
+                encoding="utf-8",
+            )
+            (artifacts_dir / "changed_files.json").write_text(
+                '{"changed_files":["file.py"]}',
+                encoding="utf-8",
+            )
+            return _make_codex_result(stdout_path=str(log_path))
+
+        def _review(*args, **kwargs):
+            workspace = kwargs["workspace"]
+            if workspace == self.workspace_dir:
+                return {
+                    "decision": "approve",
+                    "unnecessary_changes": [],
+                    "test_gaps": [],
+                    "risk_items": ["primary is riskier"],
+                    "protected_path_touches": [],
+                    "postable_findings": [
+                        {
+                            "id": "R1",
+                            "severity": "high",
+                            "origin": "diff_reviewer",
+                            "confidence": 0.9,
+                            "file": "file.py",
+                            "line_start": 1,
+                            "line_end": 1,
+                            "claim": "bug",
+                            "evidence": ["diff"],
+                            "verifier_status": "confirmed",
+                        }
+                    ],
+                }
+            return _make_review("approve")
+
+        with (
+            self._patch_workspace(),
+            patch.object(self.pipeline, "_prepare_candidate_workspace", side_effect=_prepare_candidate),
+            patch.object(self.pipeline.codex_runner, "run", side_effect=_codex_run),
+            self._patch_detect_changed(),
+            self._patch_workflow(),
+            self._patch_workflow_text(),
+            self._patch_verify(),
+            patch.object(self.pipeline.claude_runner, "review", side_effect=_review),
+            self._patch_git_diff(),
+            self._patch_commit_push(True),
+        ):
+            await self.pipeline.execute_run(
+                chat=self.adapter,
+                thread_id=THREAD_ID,
+                repo_full_name="owner/repo",
+                issue=make_test_issue(),
+            )
+
+        self.assertEqual(
+            "agent/gh-1-test-att-001-alt1", self.github_client.create_pull_request.call_args.kwargs["head"]
+        )
+        self.assertEqual("alt1", self.state_store.load_artifact(ISSUE_KEY, "runner_metadata.json")["candidate_id"])
+        self.assertEqual("att-001", self.state_store.current_attempt_id(ISSUE_KEY))
+        self.assertEqual(
+            "alt1",
+            self.state_store.load_attempt_artifact(ISSUE_KEY, "att-001", "winner_selection.json")[
+                "winner_candidate_id"
+            ],
+        )
+        winner_selection = self.state_store.load_attempt_artifact(ISSUE_KEY, "att-001", "winner_selection.json")
+        self.assertEqual(["primary", "alt1"], winner_selection["successful_candidates"])
+        self.assertEqual("deterministic_rank", winner_selection["selection_basis"])
+        self.assertIn("winner_reason", winner_selection)
+        self.assertEqual(2, len(winner_selection["candidates"]))
+        self.assertEqual(
+            "alt1",
+            self.state_store.load_attempt_artifact(ISSUE_KEY, "att-001", "final_attempt_summary.json")[
+                "winner_candidate_id"
+            ],
+        )
+        self.assertEqual(
+            "completed",
+            self.state_store.load_attempt_artifact(ISSUE_KEY, "att-001", "attempt_manifest.json")["status"],
+        )
+        self.assertEqual(
+            "alt1",
+            self.state_store.load_candidate_artifact(ISSUE_KEY, "att-001", "alt1", "runner_metadata.json")[
+                "candidate_id"
+            ],
+        )
+        self.assertEqual(
+            "approve",
+            self.state_store.load_candidate_artifact(ISSUE_KEY, "att-001", "alt1", "review_result.json")["decision"],
+        )
+        self.assertEqual(
+            "approve",
+            self.state_store.load_candidate_artifact(ISSUE_KEY, "att-001", "alt1", "review_summary.json")["decision"],
+        )
+        self.assertTrue(
+            self.state_store.load_candidate_artifact(ISSUE_KEY, "att-001", "alt1", "proof_result.json")["complete"]
+        )
+        self.assertEqual(
+            "approve",
+            self.state_store.load_candidate_artifact(ISSUE_KEY, "att-001", "alt1", "latest_review_delta.json")[
+                "decision"
+            ],
+        )
+        self.assertEqual(
+            [],
+            self.state_store.load_candidate_artifact(ISSUE_KEY, "att-001", "alt1", "scope_analysis.json")[
+                "must_not_touch_violations"
+            ],
+        )
+        self.adapter.assert_message_contains(THREAD_ID, "candidate mode を有効化")
+        self.adapter.assert_message_contains(THREAD_ID, "winner は `alt1`")
+
+    async def test_repairable_narrow_fix_reuses_same_attempt_same_candidate_new_session(self) -> None:
+        review_calls = 0
+        codex_calls = 0
+
+        def _codex_run(*args, **kwargs):
+            nonlocal codex_calls
+            codex_calls += 1
+            workspace = kwargs["workspace"]
+            candidate_id = getattr(kwargs.get("run_identity"), "candidate_id", "primary")
+            log_path = Path(workspace) / f"{candidate_id}-{codex_calls}.log"
+            log_path.write_text(f"{candidate_id} log {codex_calls}\n", encoding="utf-8")
+            artifacts_dir = Path(kwargs["run_dir"]) / "artifacts"
+            artifacts_dir.mkdir(parents=True, exist_ok=True)
+            (artifacts_dir / "implementation_result.json").write_text(
+                f'{{"candidate_id":"{candidate_id}","summary":"ok-{codex_calls}","changed_files":["file.py"]}}',
+                encoding="utf-8",
+            )
+            (artifacts_dir / "changed_files.json").write_text(
+                '{"changed_files":["file.py"]}',
+                encoding="utf-8",
+            )
+            return _make_codex_result(stdout_path=str(log_path))
+
+        def _review(*args, **kwargs):
+            nonlocal review_calls
+            review_calls += 1
+            if review_calls == 1:
+                return {
+                    "decision": "repairable",
+                    "unnecessary_changes": [],
+                    "test_gaps": [],
+                    "risk_items": ["rerun focused checks"],
+                    "protected_path_touches": [],
+                    "postable_findings": [
+                        {
+                            "id": "R1",
+                            "severity": "medium",
+                            "origin": "diff_reviewer",
+                            "confidence": 0.8,
+                            "file": "file.py",
+                            "line_start": 1,
+                            "line_end": 1,
+                            "claim": "needs a small follow-up",
+                            "evidence": ["diff"],
+                            "verifier_status": "confirmed",
+                        }
+                    ],
+                }
+            return _make_review("approve")
+
+        with (
+            self._patch_workspace(),
+            patch.object(self.pipeline.codex_runner, "run", side_effect=_codex_run),
+            self._patch_detect_changed(["file.py"]),
+            self._patch_workflow(),
+            self._patch_workflow_text(),
+            self._patch_verify(),
+            patch.object(self.pipeline.claude_runner, "review", side_effect=_review),
+            self._patch_git_diff(),
+            self._patch_commit_push(True),
+        ):
+            await self.pipeline.execute_run(
+                chat=self.adapter,
+                thread_id=THREAD_ID,
+                repo_full_name="owner/repo",
+                issue=make_test_issue(),
+            )
+
+        self.assertEqual(2, codex_calls)
+        self.assertEqual(2, review_calls)
+        self.assertTrue(
+            self.state_store.load_candidate_artifact(ISSUE_KEY, "att-001", "primary", "session_handoff_bundle.json")
+        )
+        self.assertEqual(
+            "candidate_complete",
+            self.state_store.load_candidate_artifact(ISSUE_KEY, "att-001", "primary", "session_checkpoint.json")[
+                "last_completed_phase"
+            ],
+        )
+        self.assertEqual(
+            "completed", self.state_store.load_attempt_artifact(ISSUE_KEY, "att-001", "attempt_manifest.json")["status"]
+        )
+        self.github_client.create_pull_request.assert_called_once()
+
+    async def test_reject_plan_misalignment_emits_replan_reason_artifact(self) -> None:
+        review = {
+            "decision": "reject",
+            "unnecessary_changes": [],
+            "test_gaps": [],
+            "risk_items": ["plan_misalignment"],
+            "protected_path_touches": [],
+        }
+
+        with (
+            self._patch_workspace(),
+            self._patch_codex(),
+            self._patch_detect_changed(["file.py"]),
+            self._patch_workflow(),
+            self._patch_workflow_text(),
+            self._patch_verify(),
+            patch.object(self.pipeline.claude_runner, "review", return_value=review),
+            self._patch_git_diff(),
+        ):
+            await self.pipeline.execute_run(
+                chat=self.adapter,
+                thread_id=THREAD_ID,
+                repo_full_name="owner/repo",
+                issue=make_test_issue(),
+            )
+
+        replan_reason = self.state_store.load_attempt_artifact(ISSUE_KEY, "att-001", "replan_reason.json")
+        self.assertEqual(["plan_misalignment"], replan_reason["reasons"])
+        self.assertEqual("att-002", replan_reason["new_attempt_id"])
+        self.github_client.create_pull_request.assert_not_called()
+
+    async def test_reject_plan_misalignment_stops_auto_replan_at_workflow_limit(self) -> None:
+        review = {
+            "decision": "reject",
+            "unnecessary_changes": [],
+            "test_gaps": [],
+            "risk_items": ["plan_misalignment"],
+            "protected_path_touches": [],
+        }
+        self.state_store.update_issue_meta(ISSUE_KEY, replan_count=2)
+
+        workflow = {
+            "commands": {},
+            "config": SimpleNamespace(
+                replanning=SimpleNamespace(
+                    enabled=True,
+                    auto_replan_on_reject_reasons=["plan_misalignment", "scope_drift"],
+                    max_replans_per_issue=2,
+                    emit_replan_reason_artifact=True,
+                )
+            ),
+        }
+
+        with (
+            self._patch_workspace(),
+            self._patch_codex(),
+            self._patch_detect_changed(["file.py"]),
+            self._patch_workflow(workflow),
+            self._patch_workflow_text(),
+            self._patch_verify(),
+            patch.object(self.pipeline.claude_runner, "review", return_value=review),
+            self._patch_git_diff(),
+        ):
+            await self.pipeline.execute_run(
+                chat=self.adapter,
+                thread_id=THREAD_ID,
+                repo_full_name="owner/repo",
+                issue=make_test_issue(),
+            )
+
+        replan_reason = self.state_store.load_attempt_artifact(ISSUE_KEY, "att-001", "replan_reason.json")
+        self.assertEqual({}, replan_reason)
+        self.assertEqual(2, self.state_store.load_issue_meta(ISSUE_KEY)["replan_count"])
+
+    async def test_candidate_mode_runs_in_parallel_up_to_workflow_limit(self) -> None:
+        self.state_store.write_artifact(
+            THREAD_ID,
+            "candidate_decision.json",
+            {"enabled": True, "candidate_ids": ["primary", "alt1"]},
+        )
+        workflow = {
+            "commands": {},
+            "config": SimpleNamespace(implementation=SimpleNamespace(max_parallel_editors=2)),
+        }
+        started: list[str] = []
+        finished: list[str] = []
+        active = 0
+        max_active = 0
+        lock = asyncio.Lock()
+
+        async def _execute_candidate(**kwargs: Any) -> CandidateExecutionResult:
+            nonlocal active, max_active
+            candidate_id = kwargs["candidate_id"]
+            async with lock:
+                started.append(candidate_id)
+                active += 1
+                max_active = max(max_active, active)
+            await asyncio.sleep(0.05)
+            async with lock:
+                active -= 1
+                finished.append(candidate_id)
+            return CandidateExecutionResult(
+                candidate_id=candidate_id,
+                workspace_info=_make_workspace_info(self.workspace_dir),
+                codex_result=_make_codex_result(stdout_path=str(self.codex_log_path)),
+                codex_log_path=str(self.codex_log_path),
+                changed_files={"changed_files": ["file.py"]},
+                scope_analysis={"unexpected_file_count": 0, "must_not_touch_violations": []},
+                command_results={},
+                verification={},
+                verification_json={},
+                review={},
+                proof_result={"complete": True, "missing_artifacts": []},
+                success=True,
+            )
+
+        def _prepare_candidate(**kwargs: Any) -> dict[str, Any]:
+            candidate_id = kwargs["candidate_id"]
+            workspace = Path(self.workspace_dir) / candidate_id
+            workspace.mkdir(parents=True, exist_ok=True)
+            return {
+                "workspace": str(workspace),
+                "branch_name": f"agent/gh-1-test-att-001-{candidate_id}",
+                "base_branch": "main",
+                "workspace_key": ISSUE_KEY,
+                "workspace_root": str(workspace.parent),
+            }
+
+        with (
+            patch.object(self.pipeline, "_prepare_candidate_workspace", side_effect=_prepare_candidate),
+            patch.object(self.pipeline, "_execute_candidate", side_effect=_execute_candidate),
+        ):
+            results = await self.pipeline._execute_candidates(
+                chat_client=self.adapter,
+                channel=self.adapter.get_channel(THREAD_ID),
+                issue_key=ISSUE_KEY,
+                run_id="run-1",
+                workflow=workflow,
+                repo_full_name="owner/repo",
+                issue=make_test_issue(),
+                issue_snapshot=make_test_issue(),
+                summary={},
+                plan={},
+                test_plan={},
+                verification_plan={},
+                attempt_id="att-001",
+                workspace_info=_make_workspace_info(self.workspace_dir),
+                candidate_ids=["primary", "alt1"],
+            )
+
+        self.assertEqual(["primary", "alt1"], [result.candidate_id for result in results])
+        self.assertEqual({"primary", "alt1"}, set(started))
+        self.assertEqual({"primary", "alt1"}, set(finished))
+        self.assertEqual(2, max_active)
+
+    async def test_scope_violation_stops_before_review(self) -> None:
+        setup_planning_artifacts(
+            THREAD_ID,
+            self.state_store,
+            plan={
+                "steps": ["step1"],
+                "candidate_files": ["file.py"],
+                "must_not_touch": ["pyproject.toml"],
+                "verification_focus": ["keep config stable"],
+            },
+        )
+        with (
+            self._patch_workspace(),
+            self._patch_codex(),
+            self._patch_detect_changed(["pyproject.toml"]),
+            self._patch_workflow(),
+            self._patch_workflow_text(),
+            patch.object(self.pipeline.claude_runner, "verify") as verify,
+            patch.object(self.pipeline.claude_runner, "review") as review,
+        ):
+            await self.pipeline.execute_run(
+                chat=self.adapter,
+                thread_id=THREAD_ID,
+                repo_full_name="owner/repo",
+                issue=make_test_issue(),
+            )
+
+        verify.assert_not_called()
+        review.assert_not_called()
+        self.assertEqual("Human Review", self.state_store.load_meta(ISSUE_KEY)["status"])
+        self.assertEqual(
+            ["pyproject.toml"],
+            self.state_store.load_candidate_artifact(ISSUE_KEY, "att-001", "primary", "scope_analysis.json")[
+                "must_not_touch_violations"
+            ],
+        )
+        self.adapter.assert_message_contains(THREAD_ID, "must_not_touch")
+
+    async def test_protected_config_violation_requires_label(self) -> None:
+        setup_planning_artifacts(
+            THREAD_ID,
+            self.state_store,
+            plan={
+                "steps": ["step1"],
+                "candidate_files": ["app/service.py"],
+                "must_not_touch": [],
+                "verification_focus": ["keep config stable"],
+            },
+        )
+        self.github_client.get_issue_snapshot.return_value = make_test_issue(labels=[])
+        with (
+            self._patch_workspace(),
+            self._patch_codex(),
+            self._patch_detect_changed(["WORKFLOW.md"]),
+            self._patch_workflow(),
+            self._patch_workflow_text(),
+            patch.object(self.pipeline.claude_runner, "verify") as verify,
+            patch.object(self.pipeline.claude_runner, "review") as review,
+        ):
+            await self.pipeline.execute_run(
+                chat=self.adapter,
+                thread_id=THREAD_ID,
+                repo_full_name="owner/repo",
+                issue=make_test_issue(),
+            )
+
+        verify.assert_not_called()
+        review.assert_not_called()
+        self.assertEqual("Human Review", self.state_store.load_meta(ISSUE_KEY)["status"])
+        scope = self.state_store.load_candidate_artifact(ISSUE_KEY, "att-001", "primary", "scope_analysis.json")
+        self.assertEqual(["WORKFLOW.md"], scope["protected_config_violations"])
+        self.assertFalse(scope["protected_config_label_present"])
+        self.assertEqual("allow-protected-config", scope["protected_config_allow_label"])
+        self.adapter.assert_message_contains(THREAD_ID, "allow-protected-config")
 
 
 class TestCodexFailure(unittest.TestCase):

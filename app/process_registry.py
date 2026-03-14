@@ -34,13 +34,24 @@ class ProcessRegistry:
             pgid=pgid,
             runner_type=runner_type,
         )
-        self._record_path(key).write_text(json.dumps(asdict(record), indent=2), encoding="utf-8")
+        records = [item for item in self.load_all(key) if item.get("runner_type") != runner_type]
+        records.append(asdict(record))
+        self._write_records(key, records)
         return record
 
-    def unregister(self, issue_key: str | int) -> None:
-        path = self._record_path(str(issue_key))
-        if path.exists():
+    def unregister(self, issue_key: str | int, runner_type: str | None = None) -> None:
+        key = str(issue_key)
+        path = self._record_path(key)
+        if not path.exists():
+            return
+        if runner_type is None:
             path.unlink()
+            return
+        remaining = [item for item in self.load_all(key) if item.get("runner_type") != runner_type]
+        if remaining:
+            self._write_records(key, remaining)
+            return
+        path.unlink()
 
     def load(self, issue_key: str | int) -> dict[str, object]:
         key = str(issue_key)
@@ -50,41 +61,72 @@ class ProcessRegistry:
             if not legacy.exists():
                 return {}
             return json.loads(legacy.read_text(encoding="utf-8"))
-        return json.loads(path.read_text(encoding="utf-8"))
+        payload = json.loads(path.read_text(encoding="utf-8"))
+        if isinstance(payload, dict) and isinstance(payload.get("records"), list):
+            records = payload.get("records") or []
+            if records:
+                latest = records[-1]
+                if isinstance(latest, dict):
+                    return latest
+            return {}
+        return payload
+
+    def load_all(self, issue_key: str | int) -> list[dict[str, object]]:
+        key = str(issue_key)
+        path = self._record_path(key)
+        if not path.exists():
+            payload = self.load(key)
+            return [payload] if payload else []
+        payload = json.loads(path.read_text(encoding="utf-8"))
+        if isinstance(payload, dict) and isinstance(payload.get("records"), list):
+            return [item for item in payload["records"] if isinstance(item, dict)]
+        if isinstance(payload, dict) and payload:
+            return [payload]
+        return []
 
     def terminate(self, issue_key: str | int) -> bool:
-        payload = self.load(issue_key)
-        if not payload:
+        payloads = self.load_all(issue_key)
+        if not payloads:
             return False
-        pgid = int(payload.get("pgid", 0) or 0)
-        pid = int(payload.get("pid", 0) or 0)
-        try:
-            if pgid > 0:
-                os.killpg(pgid, signal.SIGTERM)
-            elif pid > 0:
-                os.kill(pid, signal.SIGTERM)
-        except ProcessLookupError:
-            self.unregister(issue_key)
-            return False
-        return True
+        stopped = False
+        for payload in payloads:
+            pgid = self._int_value(payload.get("pgid"))
+            pid = self._int_value(payload.get("pid"))
+            try:
+                if pgid > 0:
+                    os.killpg(pgid, signal.SIGTERM)
+                    stopped = True
+                elif pid > 0:
+                    os.kill(pid, signal.SIGTERM)
+                    stopped = True
+            except ProcessLookupError:
+                continue
+        self.unregister(issue_key)
+        return stopped
 
     def is_active(self, issue_key: str | int) -> bool:
-        payload = self.load(issue_key)
-        if not payload:
+        payloads = self.load_all(issue_key)
+        if not payloads:
             return False
-        pgid = int(payload.get("pgid", 0) or 0)
-        pid = int(payload.get("pid", 0) or 0)
-        try:
-            if pgid > 0:
-                os.killpg(pgid, 0)
-                return True
-            if pid > 0:
-                os.kill(pid, 0)
-                return True
-        except ProcessLookupError:
-            self.unregister(issue_key)
-            return False
-        except PermissionError:
+        active_records: list[dict[str, object]] = []
+        for payload in payloads:
+            pgid = self._int_value(payload.get("pgid"))
+            pid = self._int_value(payload.get("pid"))
+            try:
+                if pgid > 0:
+                    os.killpg(pgid, 0)
+                    active_records.append(payload)
+                    continue
+                if pid > 0:
+                    os.kill(pid, 0)
+                    active_records.append(payload)
+            except ProcessLookupError:
+                continue
+            except PermissionError:
+                active_records.append(payload)
+        if active_records:
+            if len(active_records) != len(payloads):
+                self._write_records(str(issue_key), active_records)
             return True
         self.unregister(issue_key)
         return False
@@ -95,3 +137,23 @@ class ProcessRegistry:
 
     def _legacy_record_path(self, issue_key: str) -> Path:
         return self.root.parent / issue_key / "process.json"
+
+    def _write_records(self, issue_key: str, records: list[dict[str, object]]) -> None:
+        payload: dict[str, object]
+        if len(records) == 1:
+            payload = records[0]
+        else:
+            payload = {"records": records}
+        self._record_path(issue_key).write_text(json.dumps(payload, indent=2), encoding="utf-8")
+
+    def _int_value(self, value: object) -> int:
+        if isinstance(value, bool):
+            return int(value)
+        if isinstance(value, int):
+            return value
+        if isinstance(value, str):
+            try:
+                return int(value)
+            except ValueError:
+                return 0
+        return 0
