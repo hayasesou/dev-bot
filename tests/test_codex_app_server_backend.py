@@ -2,9 +2,10 @@ from __future__ import annotations
 
 import asyncio
 import unittest
+from unittest.mock import patch
 
 from app.runners.codex_app_server_backend import CodexAppServerBackend
-from app.runners.execution_backend import RunHandle
+from app.runners.execution_backend import RunHandle, RunSpec
 
 
 class CodexAppServerBackendTests(unittest.TestCase):
@@ -54,5 +55,143 @@ class CodexAppServerBackendTests(unittest.TestCase):
             self.assertEqual("thread_2", handle.thread_id)
             self.assertEqual("turn_1", handle.turn_id)
             self.assertEqual(123, handle.process_id)
+
+        asyncio.run(run_test())
+
+    def test_read_thread_returns_thread_payload(self) -> None:
+        backend = CodexAppServerBackend()
+
+        async def run_test() -> None:
+            calls: list[str] = []
+            fake_proc = type("Proc", (), {"pid": 123, "stdout": None, "stdin": None})()
+
+            async def fake_request(
+                method: str, params: dict[str, object], request_id: int | None = None
+            ) -> dict[str, object]:
+                del request_id
+                calls.append(method)
+                if method == "initialize":
+                    return {"result": {}}
+                if method == "thread/read":
+                    self.assertEqual({"threadId": "thread_1"}, params)
+                    return {"result": {"thread": {"id": "thread_1", "turn_count": 3, "status": "active"}}}
+                raise AssertionError(method)
+
+            async def fake_notify(method: str, params: dict[str, object]) -> None:
+                del params
+                calls.append(method)
+
+            async def fake_reader_loop() -> None:
+                return None
+
+            async def fake_shutdown() -> None:
+                calls.append("shutdown")
+
+            with patch("app.runners.codex_app_server_backend.asyncio.create_subprocess_shell", return_value=fake_proc):
+                backend._request = fake_request  # type: ignore[method-assign]
+                backend._notify = fake_notify  # type: ignore[method-assign]
+                backend._reader_loop = fake_reader_loop  # type: ignore[method-assign]
+                backend._shutdown = fake_shutdown  # type: ignore[method-assign]
+                payload = await backend.read_thread("thread_1")
+            self.assertEqual("thread_1", payload["id"])
+            self.assertEqual(3, payload["turn_count"])
+            self.assertEqual(["initialize", "initialized", "thread/read", "shutdown"], calls)
+
+        asyncio.run(run_test())
+
+    def test_start_run_forks_from_existing_thread_when_requested(self) -> None:
+        backend = CodexAppServerBackend()
+
+        async def run_test() -> None:
+            calls: list[str] = []
+            fake_proc = type("Proc", (), {"pid": 123, "stdout": None, "stdin": None})()
+
+            async def fake_request(
+                method: str, params: dict[str, object], request_id: int | None = None
+            ) -> dict[str, object]:
+                del request_id
+                calls.append(method)
+                if method == "initialize":
+                    return {"result": {}}
+                if method == "thread/fork":
+                    self.assertEqual({"threadId": "thread_base"}, params)
+                    return {"result": {"thread": {"id": "thread_forked"}}}
+                if method == "turn/start":
+                    self.assertEqual("thread_forked", params["threadId"])
+                    return {"result": {"turn": {"id": "turn_1"}}}
+                raise AssertionError(method)
+
+            async def fake_notify(method: str, params: dict[str, object]) -> None:
+                del params
+                calls.append(method)
+
+            async def fake_reader_loop() -> None:
+                return None
+
+            with patch("app.runners.codex_app_server_backend.asyncio.create_subprocess_shell", return_value=fake_proc):
+                backend._request = fake_request  # type: ignore[method-assign]
+                backend._notify = fake_notify  # type: ignore[method-assign]
+                backend._reader_loop = fake_reader_loop  # type: ignore[method-assign]
+                handle = await backend.start_run(
+                    RunSpec(
+                        run_id="run-1",
+                        issue_key="owner/repo#1",
+                        candidate_id="alt1",
+                        cwd="/tmp/work",
+                        prompt="implement",
+                        session_id="thread_base",
+                        session_strategy="fork",
+                    )
+                )
+            self.assertEqual("thread_forked", handle.thread_id)
+            self.assertEqual("turn_1", handle.turn_id)
+            self.assertEqual(["initialize", "initialized", "thread/fork", "turn/start"], calls)
+
+        asyncio.run(run_test())
+
+    def test_start_run_uses_compact_start_for_rollover(self) -> None:
+        backend = CodexAppServerBackend()
+
+        async def run_test() -> None:
+            calls: list[str] = []
+            fake_proc = type("Proc", (), {"pid": 123, "stdout": None, "stdin": None})()
+
+            async def fake_request(
+                method: str, params: dict[str, object], request_id: int | None = None
+            ) -> dict[str, object]:
+                del request_id
+                calls.append(method)
+                if method == "initialize":
+                    return {"result": {}}
+                if method == "thread/compact/start":
+                    self.assertEqual("thread_old", params["threadId"])
+                    return {"result": {"thread": {"id": "thread_compact"}, "turn": {"id": "turn_9"}}}
+                raise AssertionError(method)
+
+            async def fake_notify(method: str, params: dict[str, object]) -> None:
+                del params
+                calls.append(method)
+
+            async def fake_reader_loop() -> None:
+                return None
+
+            with patch("app.runners.codex_app_server_backend.asyncio.create_subprocess_shell", return_value=fake_proc):
+                backend._request = fake_request  # type: ignore[method-assign]
+                backend._notify = fake_notify  # type: ignore[method-assign]
+                backend._reader_loop = fake_reader_loop  # type: ignore[method-assign]
+                handle = await backend.start_run(
+                    RunSpec(
+                        run_id="run-1",
+                        issue_key="owner/repo#1",
+                        candidate_id="primary",
+                        cwd="/tmp/work",
+                        prompt="resume",
+                        session_id="thread_old",
+                        session_strategy="compact",
+                    )
+                )
+            self.assertEqual("thread_compact", handle.thread_id)
+            self.assertEqual("turn_9", handle.turn_id)
+            self.assertEqual(["initialize", "initialized", "thread/compact/start"], calls)
 
         asyncio.run(run_test())

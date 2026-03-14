@@ -40,22 +40,58 @@ class CodexAppServerBackend(ExecutionBackend):
         self._returncode = 1
         self._turn_completed = False
         self._closed = False
-        self._proc = await asyncio.create_subprocess_shell(
-            self.command,
-            cwd=spec.cwd,
-            stdin=asyncio.subprocess.PIPE,
-            stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.STDOUT,
-        )
-        self._reader_task = asyncio.create_task(self._reader_loop())
+        await self._boot_client(cwd=spec.cwd)
 
-        await self._request(
-            "initialize",
-            {"clientInfo": {"name": "dev-bot", "version": "phase1"}, "capabilities": {}},
-            request_id=1,
+        strategy = spec.session_strategy.strip() or "fresh"
+        if strategy == "compact":
+            thread_id, turn_id = await self._compact_start(spec)
+        else:
+            thread_id = await self._start_thread(spec, strategy=strategy)
+            turn_id = await self._start_turn(spec, thread_id)
+        return RunHandle(
+            run_id=spec.run_id,
+            thread_id=thread_id,
+            turn_id=turn_id,
+            process_id=self._proc.pid if self._proc else None,
         )
-        await self._notify("initialized", {})
 
+    async def read_thread(self, thread_id: str) -> dict[str, Any]:
+        if not thread_id.strip():
+            raise RuntimeError("thread/read requires thread_id")
+        self._event_log_path = None
+        self._artifacts_dir = None
+        self._summary_chunks = []
+        self._implementation_result = None
+        self._returncode = 1
+        self._turn_completed = False
+        self._closed = False
+        await self._boot_client(cwd=str(Path.cwd()))
+        try:
+            payload = await self._request("thread/read", {"threadId": thread_id}, request_id=2)
+            result = payload.get("result")
+            if isinstance(result, dict):
+                thread = result.get("thread")
+                if isinstance(thread, dict):
+                    normalized = dict(thread)
+                    normalized.setdefault("id", thread_id)
+                    return normalized
+                normalized = dict(result)
+                normalized.setdefault("id", thread_id)
+                return normalized
+            return {"id": thread_id}
+        finally:
+            await self._shutdown()
+
+    async def _start_thread(self, spec: RunSpec, *, strategy: str) -> str:
+        if strategy == "fork":
+            if not spec.session_id:
+                raise RuntimeError("thread/fork requires session_id")
+            thread_resp = await self._request(
+                "thread/fork",
+                {"threadId": spec.session_id},
+                request_id=2,
+            )
+            return self._extract_nested_id(thread_resp, "thread")
         thread_resp = await self._request(
             "thread/start",
             {
@@ -67,8 +103,9 @@ class CodexAppServerBackend(ExecutionBackend):
             },
             request_id=2,
         )
-        thread_id = self._extract_nested_id(thread_resp, "thread")
+        return self._extract_nested_id(thread_resp, "thread")
 
+    async def _start_turn(self, spec: RunSpec, thread_id: str) -> str:
         turn_resp = await self._request(
             "turn/start",
             {
@@ -93,13 +130,41 @@ class CodexAppServerBackend(ExecutionBackend):
             },
             request_id=3,
         )
-        turn_id = self._extract_nested_id(turn_resp, "turn")
-        return RunHandle(
-            run_id=spec.run_id,
-            thread_id=thread_id,
-            turn_id=turn_id,
-            process_id=self._proc.pid if self._proc else None,
+        return self._extract_nested_id(turn_resp, "turn")
+
+    async def _compact_start(self, spec: RunSpec) -> tuple[str, str]:
+        if not spec.session_id:
+            raise RuntimeError("thread/compact/start requires session_id")
+        resp = await self._request(
+            "thread/compact/start",
+            {
+                "threadId": spec.session_id,
+                "input": [{"type": "text", "text": spec.prompt}],
+                "cwd": spec.cwd,
+                "approvalPolicy": "never",
+                "model": spec.model,
+                "effort": "medium",
+                "summary": "concise",
+                "sandboxPolicy": {
+                    "type": "workspaceWrite",
+                    "writableRoots": spec.writable_roots or [spec.cwd],
+                    "readOnlyAccess": {
+                        "type": "restricted",
+                        "includePlatformDefaults": True,
+                        "readableRoots": spec.read_only_roots,
+                    },
+                    "networkAccess": spec.network_access,
+                },
+                "outputSchema": self._load_output_schema(spec.output_schema_name),
+            },
+            request_id=2,
         )
+        thread_id = self._extract_nested_id(resp, "thread")
+        try:
+            turn_id = self._extract_nested_id(resp, "turn")
+        except RuntimeError:
+            turn_id = await self._start_turn(spec, thread_id)
+        return thread_id, turn_id
 
     async def steer(self, handle: RunHandle, message: str) -> None:
         if not self._allow_turn_steer:
@@ -149,7 +214,24 @@ class CodexAppServerBackend(ExecutionBackend):
             mode="app-server",
             implementation_result_path=implementation_result_path,
             raw_event_log_path=str(self._event_log_path) if self._event_log_path else "",
+            session_id=_handle.thread_id,
         )
+
+    async def _boot_client(self, *, cwd: str) -> None:
+        self._proc = await asyncio.create_subprocess_shell(
+            self.command,
+            cwd=cwd,
+            stdin=asyncio.subprocess.PIPE,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.STDOUT,
+        )
+        self._reader_task = asyncio.create_task(self._reader_loop())
+        await self._request(
+            "initialize",
+            {"clientInfo": {"name": "dev-bot", "version": "phase1"}, "capabilities": {}},
+            request_id=1,
+        )
+        await self._notify("initialized", {})
 
     async def _reader_loop(self) -> None:
         assert self._proc is not None and self._proc.stdout is not None

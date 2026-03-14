@@ -11,16 +11,20 @@ def build_verification_plan(
     plan: dict[str, Any],
 ) -> dict[str, Any]:
     profile = _select_profile(repo_profile)
+    repair_profile = _select_repair_profile(profile)
     scope_paths = _select_scope(plan)
     hard_checks, advisory_checks = _build_checks(profile, repo_profile, scope_paths)
+    repair_checks = _build_repair_checks(repair_profile, repo_profile, scope_paths)
     return {
         "profile": profile,
+        "repair_profile": repair_profile,
         "scope": {"paths": scope_paths},
         "selection_reason": _selection_reason(profile, repo_profile),
         "confidence": _confidence(profile),
         "profile_patch": {},
         "hard_checks": hard_checks,
         "advisory_checks": advisory_checks,
+        "repair_checks": repair_checks,
     }
 
 
@@ -47,13 +51,25 @@ def _select_profile(repo_profile: dict[str, Any]) -> str:
     if suggested:
         return suggested
     languages = {str(item).strip() for item in repo_profile.get("languages", []) if str(item).strip()}
+    if "python" in languages and "typescript" in languages:
+        return "mixed-py-ts"
     if "typescript" in languages:
-        return "node-ts"
+        return "ts-basic"
     if "javascript" in languages:
         return "node-basic"
     if "python" in languages:
         return "python-basic"
     return "generic-minimal"
+
+
+def _select_repair_profile(profile: str) -> str:
+    if profile == "python-basic":
+        return "python-fast-repair"
+    if profile == "ts-basic":
+        return "ts-fast-repair"
+    if profile == "mixed-py-ts":
+        return "mixed-py-ts"
+    return ""
 
 
 def _select_scope(plan: dict[str, Any]) -> list[str]:
@@ -90,7 +106,7 @@ def _build_checks(
     for command in _commands_for_scope(repo_profile.get("test_commands", []), scope_paths):
         hard_checks.append({"name": "tests", "command": command, "allow_not_applicable": False})
 
-    if profile in {"python-typecheck", "node-ts"}:
+    if profile in {"python-basic", "python-typecheck", "ts-basic", "node-ts", "mixed-py-ts"}:
         typecheck_commands = _commands_for_scope(repo_profile.get("typecheck_commands", []), scope_paths)
         if typecheck_commands:
             for command in typecheck_commands:
@@ -104,6 +120,26 @@ def _build_checks(
     if not hard_checks:
         return _generic_minimal_checks(scope_paths)
     return hard_checks, advisory_checks
+
+
+def _build_repair_checks(
+    repair_profile: str,
+    repo_profile: dict[str, Any],
+    scope_paths: list[str],
+) -> list[dict[str, Any]]:
+    if repair_profile not in {"python-fast-repair", "ts-fast-repair", "mixed-py-ts"}:
+        return []
+    checks: list[dict[str, Any]] = []
+    for command in _commands_for_scope(repo_profile.get("format_commands", []), scope_paths):
+        checks.append({"name": "format", "command": command, "allow_not_applicable": True})
+    for command in _commands_for_scope(repo_profile.get("lint_commands", []), scope_paths):
+        checks.append({"name": "lint", "command": command, "allow_not_applicable": True})
+    for command in _commands_for_scope(repo_profile.get("typecheck_commands", []), scope_paths):
+        checks.append({"name": "typecheck", "command": command, "allow_not_applicable": True})
+    test_commands = _commands_for_scope(repo_profile.get("test_commands", []), scope_paths)
+    if test_commands:
+        checks.append({"name": "tests", "command": test_commands[0], "allow_not_applicable": True})
+    return checks
 
 
 def _commands_for_scope(commands: Any, scope_paths: list[str]) -> list[str]:

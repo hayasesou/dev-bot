@@ -192,8 +192,10 @@ def _suggest_verification_profile(
     language_set = set(languages)
     if "html" in language_set and not package_json and not pyproject:
         return "static-web"
+    if "python" in language_set and "typescript" in language_set:
+        return "mixed-py-ts"
     if "typescript" in language_set:
-        return "node-ts"
+        return "ts-basic"
     if "javascript" in language_set:
         return "node-basic"
     if "python" in language_set:

@@ -47,7 +47,7 @@ workspace:
   keep_successful_workspaces: true
   key_template: "{owner}/{repo}#{issue_number}"
   branch_template: "agent/gh-{issue_number}-{slug}"
-  candidate_branch_template: "agent/gh-{issue_number}-{slug}-{candidate_id}"
+  candidate_branch_template: "agent/gh-{issue_number}-{slug}-{attempt_id}-{candidate_id}"
 
 hooks:
   after_create: ./scripts/agent_after_create.sh
@@ -76,6 +76,10 @@ codex:
   read_timeout_ms: 5000
   allow_turn_steer: true
   allow_thread_resume_same_run_only: true
+  compaction_policy:
+    turn_count_gte: 12
+    steer_count_gte: 2
+    repair_cycles_gte: 3
   service_name: dev-bot
 
 review:
@@ -98,6 +102,9 @@ planning:
   provider: claude-agent-sdk
   enabled: true
   mode: committee
+  legacy_fallback:
+    enabled: true
+    use_only_on_committee_failure: true
   cwd_source: plan_workspace
   max_turns: 4
   timeout_seconds: 300
@@ -143,10 +150,37 @@ implementation:
     triggers:
       rework_count_gte: 1
       planner_confidence_lt: 0.75
-      require_clear_design_branches: true
+      require_clear_design_branches: false
   push_policy:
     push_only_winner: true
     cleanup_loser_local_branches: true
+
+replanning:
+  enabled: true
+  auto_replan_on_reject_reasons:
+    - plan_misalignment
+    - scope_drift
+  max_replans_per_issue: 2
+  emit_replan_reason_artifact: true
+  create_new_attempt_on_replan: true
+
+protected_config:
+  default: deny
+  allow_label: allow-protected-config
+  protected_paths:
+    - AGENTS.md
+    - WORKFLOW.md
+    - CLAUDE.md
+    - .claude/**
+    - .github/workflows/**
+    - pyproject.toml
+    - docs/policy/**
+    - docs/GITHUB_APP_SETUP.md
+    - docs/PROJECT_V2_SETUP.md
+  allowlist_source:
+    priority:
+      - issue_body_section: "保護設定変更許可リスト"
+      - artifact: protected_config_allowlist.json
 
 verification:
   required_artifacts:
@@ -157,7 +191,11 @@ verification:
     - verification_plan.json
     - changed_files.json
     - implementation_result.json
+    - repair_feedback.json
+    - review_result.json
+    - review_decision.json
     - review_findings.json
+    - postable_findings.json
     - verification.json
     - final_summary.json
     - run.log
@@ -171,7 +209,7 @@ verification:
     - name: lint
       command: uv run ruff check .
     - name: tests
-      command: uv run pytest -q
+      command: uv run python -m pytest -q
     - name: typecheck
       command: uv run pyright app
 

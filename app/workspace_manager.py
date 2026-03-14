@@ -98,6 +98,83 @@ class WorkspaceManager:
             "is_empty_repo": False,
         }
 
+    def prepare_attempt_candidate_workspace(
+        self,
+        repo_full_name: str,
+        issue_number: int,
+        *,
+        attempt_id: str,
+        candidate_id: str,
+        issue_title: str | None = None,
+    ) -> dict:
+        owner, repo = repo_full_name.split("/", 1)
+        issue_slug = _slugify_issue_title(issue_title or f"issue-{issue_number}")
+        workspace_key = f"{owner}/{repo}#{issue_number}"
+        repo_root = self.root / owner / repo
+        mirror = self.root / "_mirrors" / f"{owner}-{repo}.git"
+        workspace_root = repo_root / f"issue-{issue_number}" / "exec" / "candidates" / attempt_id / candidate_id
+        workspace = workspace_root / "repo"
+        mirror.parent.mkdir(parents=True, exist_ok=True)
+        workspace_root.mkdir(parents=True, exist_ok=True)
+
+        if not mirror.exists():
+            self._run(["git", "clone", "--mirror", self._clone_url(repo_full_name), str(mirror)])
+        else:
+            self._run(["git", "--git-dir", str(mirror), "remote", "set-url", "origin", self._clone_url(repo_full_name)])
+            self._run(["git", "--git-dir", str(mirror), "fetch", "origin", "--prune"])
+
+        branch_name = f"agent/gh-{issue_number}-{issue_slug}-{attempt_id}-{candidate_id}"
+        if not self._has_any_ref(git_dir=str(mirror)):
+            workspace_info = self._prepare_empty_repo_workspace(
+                repo_full_name=repo_full_name,
+                workspace=str(workspace),
+                branch_name=branch_name,
+            )
+            return {
+                "workspace_key": workspace_key,
+                "workspace": str(workspace),
+                "workspace_root": str(workspace_root),
+                "mirror": str(mirror),
+                "branch_name": branch_name,
+                "base_branch": self.EMPTY_REPO_BOOTSTRAP_BRANCH,
+                "attempt_id": attempt_id,
+                "candidate_id": candidate_id,
+                "bootstrap_base_branch": self.EMPTY_REPO_BOOTSTRAP_BRANCH,
+                "is_empty_repo": True,
+                **workspace_info,
+            }
+
+        head_branch = self._resolve_default_branch(repo_full_name, git_dir=str(mirror))
+        mirror_base_ref = self._resolve_mirror_base_ref(str(mirror), head_branch)
+        if not workspace.exists():
+            self._run(["git", "--git-dir", str(mirror), "worktree", "add", str(workspace), mirror_base_ref])
+        else:
+            self._run(["git", "-C", str(workspace), "fetch", "origin"])
+
+        current_branch = self._capture(["git", "-C", str(workspace), "rev-parse", "--abbrev-ref", "HEAD"]).strip()
+        if current_branch != branch_name:
+            branches = self._capture(["git", "-C", str(workspace), "branch", "--list", branch_name]).strip()
+            if branches:
+                self._run(["git", "-C", str(workspace), "checkout", branch_name])
+            else:
+                self._run(["git", "-C", str(workspace), "checkout", "-B", branch_name, mirror_base_ref])
+
+        self._run(["git", "-C", str(workspace), "remote", "set-url", "origin", self._clone_url(repo_full_name)])
+        self._run(["git", "-C", str(workspace), "config", "user.name", "dev-bot"])
+        self._run(["git", "-C", str(workspace), "config", "user.email", "dev-bot@example.local"])
+        return {
+            "workspace_key": workspace_key,
+            "workspace": str(workspace),
+            "workspace_root": str(workspace_root),
+            "mirror": str(mirror),
+            "branch_name": branch_name,
+            "base_branch": head_branch,
+            "attempt_id": attempt_id,
+            "candidate_id": candidate_id,
+            "bootstrap_base_branch": "",
+            "is_empty_repo": False,
+        }
+
     def prepare_plan_workspace(
         self, repo_full_name: str, thread_id: int | None = None, issue_number: int | None = None
     ) -> dict:

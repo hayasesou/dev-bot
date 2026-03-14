@@ -9,20 +9,9 @@ from dataclasses import dataclass
 from time import monotonic
 from typing import Any
 
-try:  # pragma: no cover - depends on optional third-party package
-    from github import Auth, Github, GithubIntegration
-    from github.GithubException import GithubException
-
-    GITHUB_SDK_AVAILABLE = True
-except ModuleNotFoundError:  # pragma: no cover - bare test env fallback
-    Auth = Github = GithubIntegration = None  # type: ignore[assignment]
-
-    class GithubException(Exception):
-        def __init__(self, data: Any | None = None) -> None:
-            super().__init__(str(data))
-            self.data = data
-
-    GITHUB_SDK_AVAILABLE = False
+from github import Github, GithubIntegration
+from github.Auth import AppAuth, Token
+from github.GithubException import GithubException
 
 
 @dataclass(frozen=True)
@@ -365,14 +354,12 @@ class GitHubIssueClient:
     def installation_token(self) -> str:
         if self._token:
             return self._token
-        if not GITHUB_SDK_AVAILABLE:
-            raise RuntimeError("PyGithub is required for GitHub App authentication")
         if not self._app_id or not self._private_key_path or not self._installation_id:
             raise RuntimeError("GitHub App credentials are not configured")
 
         try:
             private_key = open(self._private_key_path, encoding="utf-8").read()
-            app_auth = Auth.AppAuth(int(self._app_id), private_key)
+            app_auth = AppAuth(int(self._app_id), private_key)
             integration = GithubIntegration(auth=app_auth)
             access_token = integration.get_access_token(int(self._installation_id))
         except (OSError, GithubException, ValueError) as exc:
@@ -421,11 +408,7 @@ class GitHubIssueClient:
             if self._token and not (self._app_id and self._private_key_path and self._installation_id):
                 client = self._require_client()
                 user = client.get_user()
-                repos = user.get_repos(
-                    visibility="all",
-                    affiliation="owner,collaborator,organization_member",
-                    sort="full_name",
-                )
+                repos = user.get_repos()
                 self._repo_cache = sorted(repo.full_name for repo in repos)
             else:
                 self._repo_cache = self._list_installation_repositories()
@@ -435,14 +418,10 @@ class GitHubIssueClient:
             raise RuntimeError(f"GitHub repository listing failed: {getattr(exc, 'data', exc)}") from exc
 
     def _build_token_client(self, token: str):
-        if not GITHUB_SDK_AVAILABLE:
-            return None
-        return Github(auth=Auth.Token(token))
+        return Github(auth=Token(token))
 
     def _build_installation_client(self):
-        if not GITHUB_SDK_AVAILABLE:
-            return None
-        return Github(auth=Auth.Token(self.installation_token()))
+        return Github(auth=Token(self.installation_token()))
 
     def _require_client(self):
         if self.client is None:

@@ -74,6 +74,17 @@ REVIEW_FINDINGS_SCHEMA: dict[str, Any] = {
     "additionalProperties": False,
 }
 
+WINNER_TIEBREAK_SCHEMA: dict[str, Any] = {
+    "type": "object",
+    "required": ["winner_candidate_id", "summary", "explanation"],
+    "properties": {
+        "winner_candidate_id": {"type": "string"},
+        "summary": {"type": "string"},
+        "explanation": {"type": "array", "items": {"type": "string"}},
+    },
+    "additionalProperties": False,
+}
+
 
 class _ClaudeReviewRole:
     def __init__(self, client: ClaudeAgentClient, *, role_name: str, task_lines: list[str]) -> None:
@@ -306,6 +317,38 @@ class ClaudeRunner:
         )
         bundle = _run_async(orchestrator.run(ctx))
         return self._summarize_review_bundle(bundle)
+
+    def judge_winner_tiebreak(
+        self,
+        *,
+        workspace: str,
+        plan: dict[str, Any],
+        candidates: list[dict[str, Any]],
+        fallback_winner_candidate_id: str,
+    ) -> dict[str, Any]:
+        prompt = (
+            "You are the exact-tie winner judge.\n"
+            "These candidates are already tied after deterministic ranking.\n"
+            "Pick exactly one winner_candidate_id from the provided candidate_id values.\n"
+            "Prefer the candidate that best preserves plan alignment, minimizes scope risk, "
+            "and gives the clearest path to human review.\n"
+            "If the evidence is still indistinguishable, pick the fallback winner.\n"
+            "Return JSON only.\n\n"
+            f"fallback_winner_candidate_id:\n{fallback_winner_candidate_id}\n\n"
+            f"plan:\n{json.dumps(plan, ensure_ascii=False, indent=2)}\n\n"
+            f"tied_candidates:\n{json.dumps(candidates, ensure_ascii=False, indent=2)}"
+        )
+        return self.client.json_response(
+            system="You are a release arbiter. Resolve exact implementation ties and return JSON only.",
+            prompt=prompt,
+            cwd=workspace,
+            max_turns=2,
+            allowed_tools=["Read", "Grep", "Glob", "Skill"],
+            permission_mode="acceptEdits",
+            setting_sources=["user", "project"],
+            output_schema=WINNER_TIEBREAK_SCHEMA,
+            prompt_kind="winner_tiebreak_judge",
+        )
 
     def _summarize_review_bundle(self, bundle: Any) -> dict[str, Any]:
         all_findings = list(bundle.all_findings.findings)

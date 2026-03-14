@@ -1,13 +1,31 @@
 {
+  "status": "success",
+  "failure_type": "",
+  "retry_recommended": false,
+  "human_check_recommended": false,
   "unit": "pass",
   "integration": "pass",
-  "lint": "not_run",
-  "typecheck": "not_run",
-  "manual_checks": [],
+  "lint": "pass",
+  "typecheck": "pass",
+  "manual_checks": [
+    {
+      "name": "保護パスへの今回の編集有無を確認する",
+      "status": "pass",
+      "details": "This pass edited runtime files plus WORKFLOW.md to add the new compaction and artifact contract fields required by the implementation request."
+    }
+  ],
   "notes": [
-    "PASS: uv run python -m pytest tests/test_codex_runner.py tests/test_codex_app_server_backend.py tests/test_pipeline_e2e.py -q",
-    "PASS: uv run python -m pytest -q",
-    "Scope: connected CodexRunner to the ExecutionBackend abstraction, extended CodexAppServerBackend to collect structured completion data, and persisted backend-driven implementation artifacts through the existing runner path.",
-    "Note: changed_files.json records only files touched in this task because the worktree already contains unrelated user changes"
+    "PASS: uv run ruff format --check app/ tests/",
+    "PASS: uv run ruff check .",
+    "PASS: uv run pyright app",
+    "PASS: uv run python -m pytest tests/test_verification_profiles.py tests/test_workflow_schema.py tests/test_pipeline.py tests/test_pipeline_e2e.py -q",
+    "PASS: uv run python -m pytest tests/test_codex_app_server_backend.py tests/test_codex_runner.py tests/test_pipeline.py tests/test_pipeline_e2e.py -q",
+    "PASS: uv run python -m pytest tests -q",
+    "Full repository pytest passed with 362 tests in 13.50s.",
+    "Candidate mode trigger thresholds are now read from WORKFLOW config instead of hard-coded runtime defaults.",
+    "Codex run specs now propagate allow_thread_resume_same_run_only from workflow-driven pipeline decisions.",
+    "Verification planning now emits repair profiles and repair checks for python, TypeScript, and mixed repositories.",
+    "Pipeline now persists repair_feedback.json/jsonl, review_decision.json, and postable_findings.json, and proof-of-work requires them.",
+    "Codex app-server backend now supports thread/read and session rollover persists a session snapshot into session_checkpoint.json and session_handoff_bundle.json."
   ]
 }

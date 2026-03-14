@@ -50,3 +50,46 @@ class VerificationProfileTests(unittest.TestCase):
 
         self.assertEqual("hard", verification["required_checks"][0]["category"])
         self.assertEqual("advisory", verification["advisory_checks"][0]["category"])
+
+    def test_build_verification_plan_for_python_includes_fast_repair_profile(self) -> None:
+        repo_profile = {
+            "languages": ["python"],
+            "lint_commands": ["uv run ruff check ."],
+            "test_commands": ["uv run python -m pytest -q"],
+            "typecheck_commands": ["uv run pyright app"],
+            "format_commands": ["uv run ruff format --check app/ tests/"],
+            "build_commands": [],
+        }
+
+        verification_plan = build_verification_plan(
+            workspace=".",
+            repo_profile=repo_profile,
+            plan={"candidate_files": ["app/service.py"]},
+        )
+
+        self.assertEqual("python-basic", verification_plan["profile"])
+        self.assertEqual("python-fast-repair", verification_plan["repair_profile"])
+        self.assertEqual(
+            ["format", "lint", "typecheck", "tests"],
+            [item["name"] for item in verification_plan["repair_checks"]],
+        )
+
+    def test_build_verification_plan_for_mixed_repo_uses_mixed_profile(self) -> None:
+        repo_profile = {
+            "languages": ["python", "typescript"],
+            "lint_commands": ["uv run ruff check .", "npm run lint"],
+            "test_commands": ["uv run python -m pytest -q", "npm test"],
+            "typecheck_commands": ["uv run pyright app", "tsc --noEmit"],
+            "format_commands": ["uv run ruff format --check app/ tests/", "biome format --check ."],
+            "build_commands": [],
+        }
+
+        verification_plan = build_verification_plan(
+            workspace=".",
+            repo_profile=repo_profile,
+            plan={"candidate_files": ["app/service.py", "web/index.ts"]},
+        )
+
+        self.assertEqual("mixed-py-ts", verification_plan["profile"])
+        self.assertEqual("mixed-py-ts", verification_plan["repair_profile"])
+        self.assertGreaterEqual(len(verification_plan["repair_checks"]), 4)

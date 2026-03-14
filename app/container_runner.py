@@ -9,9 +9,9 @@ from collections import deque
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
-from claude_agent_sdk import AgentDefinition, ClaudeSDKClient, HookMatcher
+from claude_agent_sdk import AgentDefinition, ClaudeSDKClient, HookJSONOutput, HookMatcher
 
 from app.agent_sdk_client import AgentResult, ClaudeAgentClient, _build_options, _collect_client_agent_result
 from app.repo_profiler import build_repo_profile
@@ -255,6 +255,7 @@ async def _run_autonomous_iterations(
         allowed_tools=DEFAULT_ALLOWED_TOOLS,
         permission_mode="default",
         setting_sources=["project"],
+        max_buffer_size=client.max_buffer_size,
         hooks=_build_hooks(activity_store),
         agents=_build_subagents(),
         output_schema={"type": "object"},
@@ -332,9 +333,10 @@ async def _run_autonomous_iterations(
 
 
 def _build_hooks(activity_store: ActivityStore) -> dict[str, list[HookMatcher]]:
-    async def pre_tool_use(input_data: dict[str, Any], tool_use_id: str | None, context: Any) -> dict[str, Any]:
+    async def pre_tool_use(input_data: Any, tool_use_id: str | None, context: Any) -> HookJSONOutput:
+        payload = cast(dict[str, Any], input_data)
         tool_name = str(input_data.get("tool_name", "unknown"))
-        tool_input = input_data.get("tool_input", {})
+        tool_input = payload.get("tool_input", {})
         if tool_name == "Bash":
             command = str(tool_input.get("command") or "").strip().lower()
             for pattern in DANGEROUS_BASH_PATTERNS:
@@ -348,13 +350,16 @@ def _build_hooks(activity_store: ActivityStore) -> dict[str, list[HookMatcher]]:
                         details={"tool_input": _truncate_details(tool_input)},
                         notify=True,
                     )
-                    return {
-                        "hookSpecificOutput": {
-                            "hookEventName": "PreToolUse",
-                            "permissionDecision": "deny",
-                            "permissionDecisionReason": f"Dangerous bash command blocked: {pattern}",
-                        }
-                    }
+                    return cast(
+                        HookJSONOutput,
+                        {
+                            "hookSpecificOutput": {
+                                "hookEventName": "PreToolUse",
+                                "permissionDecision": "deny",
+                                "permissionDecisionReason": f"Dangerous bash command blocked: {pattern}",
+                            }
+                        },
+                    )
         summary = _summarize_tool(tool_name, tool_input)
         activity_store.record(
             phase="tool",
@@ -365,26 +370,28 @@ def _build_hooks(activity_store: ActivityStore) -> dict[str, list[HookMatcher]]:
             details={"tool_input": _truncate_details(tool_input)},
             notify=tool_name in NOTIFIABLE_TOOLS,
         )
-        return {}
+        return cast(HookJSONOutput, {})
 
-    async def post_tool_use(input_data: dict[str, Any], tool_use_id: str | None, context: Any) -> dict[str, Any]:
-        tool_name = str(input_data.get("tool_name", "unknown"))
-        summary = _summarize_tool_result(tool_name, input_data.get("tool_response"))
+    async def post_tool_use(input_data: Any, tool_use_id: str | None, context: Any) -> HookJSONOutput:
+        payload = cast(dict[str, Any], input_data)
+        tool_name = str(payload.get("tool_name", "unknown"))
+        summary = _summarize_tool_result(tool_name, payload.get("tool_response"))
         activity_store.record(
             phase="tool",
             tool_name=tool_name,
             summary=summary,
             status="completed",
             tool_use_id=tool_use_id,
-            details={"tool_response": _truncate_details(input_data.get("tool_response"))},
+            details={"tool_response": _truncate_details(payload.get("tool_response"))},
             notify=False,
         )
-        return {}
+        return cast(HookJSONOutput, {})
 
-    async def post_tool_failure(input_data: dict[str, Any], tool_use_id: str | None, context: Any) -> dict[str, Any]:
-        tool_name = str(input_data.get("tool_name", "unknown"))
-        summary = _summarize_tool_failure(tool_name, input_data.get("tool_response"))
-        details = _build_failure_details(input_data)
+    async def post_tool_failure(input_data: Any, tool_use_id: str | None, context: Any) -> HookJSONOutput:
+        payload = cast(dict[str, Any], input_data)
+        tool_name = str(payload.get("tool_name", "unknown"))
+        summary = _summarize_tool_failure(tool_name, payload.get("tool_response"))
+        details = _build_failure_details(payload)
         activity_store.record(
             phase="tool",
             tool_name=tool_name,
@@ -394,33 +401,35 @@ def _build_hooks(activity_store: ActivityStore) -> dict[str, list[HookMatcher]]:
             details=details,
             notify=True,
         )
-        return {}
+        return cast(HookJSONOutput, {})
 
-    async def subagent_start(input_data: dict[str, Any], tool_use_id: str | None, context: Any) -> dict[str, Any]:
-        agent_type = str(input_data.get("agent_type", "unknown"))
+    async def subagent_start(input_data: Any, tool_use_id: str | None, context: Any) -> HookJSONOutput:
+        payload = cast(dict[str, Any], input_data)
+        agent_type = str(payload.get("agent_type", "unknown"))
         activity_store.record(
             phase="subagent",
             tool_name=agent_type,
             summary=f"サブエージェント `{agent_type}` を開始しました",
             status="started",
             tool_use_id=tool_use_id,
-            details=_truncate_details(input_data),
+            details=_truncate_details(payload),
             notify=agent_type in NOTIFIABLE_SUBAGENTS,
         )
-        return {}
+        return cast(HookJSONOutput, {})
 
-    async def subagent_stop(input_data: dict[str, Any], tool_use_id: str | None, context: Any) -> dict[str, Any]:
-        agent_type = str(input_data.get("agent_type", "unknown"))
+    async def subagent_stop(input_data: Any, tool_use_id: str | None, context: Any) -> HookJSONOutput:
+        payload = cast(dict[str, Any], input_data)
+        agent_type = str(payload.get("agent_type", "unknown"))
         activity_store.record(
             phase="subagent",
             tool_name=agent_type,
             summary=f"サブエージェント `{agent_type}` が完了しました",
             status="completed",
             tool_use_id=tool_use_id,
-            details=_truncate_details(input_data),
+            details=_truncate_details(payload),
             notify=False,
         )
-        return {}
+        return cast(HookJSONOutput, {})
 
     return {
         "PreToolUse": [HookMatcher(hooks=[pre_tool_use])],
@@ -488,7 +497,12 @@ def _build_subagents() -> dict[str, AgentDefinition]:
 
 def _run_commands(workspace: str, profile: dict) -> dict:
     steps: list[dict[str, Any]] = []
-    migration = profile.get("migration") if isinstance(profile.get("migration"), dict) else {}
+    raw_migration = profile.get("migration")
+    migration: dict[str, Any]
+    if isinstance(raw_migration, dict):
+        migration = raw_migration
+    else:
+        migration = {}
     apply_cmds = list(migration.get("apply_cmds", [])) if migration else []
     rollback_cmds = list(migration.get("rollback_cmds", [])) if migration else []
 
@@ -611,7 +625,7 @@ def _run_commands(workspace: str, profile: dict) -> dict:
             "applied": bool(apply_cmds),
             "rolled_back": rolled_back,
             "reapplied": reapplied,
-            "engine": migration.get("engine", ""),
+            "engine": str(migration.get("engine", "")),
         },
     }
 

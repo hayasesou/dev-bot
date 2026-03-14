@@ -15,10 +15,10 @@ CORE_PLANNING_ARTIFACTS: tuple[str, ...] = (
     "requirement_summary.json",
     "plan.json",
     "test_plan.json",
+    "verification_plan.json",
 )
 
-# Phase 1: observe only. Promote to required after the committee reliably writes it.
-RECOMMENDED_PLANNING_ARTIFACTS: tuple[str, ...] = ("verification_plan.json",)
+RECOMMENDED_PLANNING_ARTIFACTS: tuple[str, ...] = ()
 
 
 class IssueScheduler:
@@ -290,6 +290,8 @@ class IssueScheduler:
             )
             return False
 
+        if not RECOMMENDED_PLANNING_ARTIFACTS:
+            return True
         recommended_ok, missing_recommended = self._has_nonempty_json_artifacts(
             thread_id, RECOMMENDED_PLANNING_ARTIFACTS
         )

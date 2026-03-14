@@ -14,12 +14,21 @@ from app.runners.execution_backend import RunSpec
 
 
 @dataclass(frozen=True)
+class RunIdentity:
+    issue_key: str
+    attempt_id: str
+    candidate_id: str
+    session_id: str | None = None
+
+
+@dataclass(frozen=True)
 class CodexRunResult:
     returncode: int
     stdout_path: str
     changed_files: list[str]
     summary: str
     mode: str
+    session_id: str = ""
 
 
 class CodexRunner:
@@ -49,6 +58,8 @@ class CodexRunner:
         plan: dict,
         test_plan: dict,
         workflow_text: str,
+        run_identity: RunIdentity,
+        handoff_bundle: dict[str, Any] | None = None,
     ) -> str:
         return (
             "You are the implementation worker for this repository.\n"
@@ -57,6 +68,8 @@ class CodexRunner:
             f"[REQUIREMENT_SUMMARY]\n{json.dumps(requirement_summary, ensure_ascii=False, indent=2)}\n\n"
             f"[PLAN]\n{json.dumps(plan, ensure_ascii=False, indent=2)}\n\n"
             f"[TEST_PLAN]\n{json.dumps(test_plan, ensure_ascii=False, indent=2)}\n\n"
+            f"[RUN_IDENTITY]\n{json.dumps(run_identity.__dict__, ensure_ascii=False, indent=2)}\n\n"
+            f"[HANDOFF_BUNDLE]\n{json.dumps(handoff_bundle or {}, ensure_ascii=False, indent=2)}\n\n"
             f"[WORKFLOW_MD]\n{workflow_text}\n\n"
             "Rules:\n"
             "- Implement only what the plan requires.\n"
@@ -77,6 +90,11 @@ class CodexRunner:
         plan: dict,
         test_plan: dict,
         workflow_text: str,
+        run_identity: RunIdentity,
+        allow_turn_steer: bool,
+        allow_thread_resume_same_run_only: bool = True,
+        handoff_bundle: dict[str, Any] | None = None,
+        steer_message: str = "",
         on_process_start: Callable[[int], None] | None = None,
         on_process_exit: Callable[[], None] | None = None,
     ) -> CodexRunResult:
@@ -89,6 +107,8 @@ class CodexRunner:
             plan=plan,
             test_plan=test_plan,
             workflow_text=workflow_text,
+            run_identity=run_identity,
+            handoff_bundle=handoff_bundle,
         )
         if self._app_server_disabled():
             with stdout_path.open("w", encoding="utf-8") as fh:
@@ -97,6 +117,8 @@ class CodexRunner:
                 workspace=workspace,
                 stdout_path=stdout_path,
                 prompt=prompt,
+                candidate_id=run_identity.candidate_id,
+                session_id=run_identity.session_id or "",
                 on_process_start=on_process_start,
                 on_process_exit=on_process_exit,
             )
@@ -106,6 +128,11 @@ class CodexRunner:
                 run_dir=run_dir,
                 stdout_path=stdout_path,
                 prompt=prompt,
+                run_identity=run_identity,
+                allow_turn_steer=allow_turn_steer,
+                allow_thread_resume_same_run_only=allow_thread_resume_same_run_only,
+                handoff_bundle=handoff_bundle,
+                steer_message=steer_message,
                 on_process_start=on_process_start,
                 on_process_exit=on_process_exit,
             )
@@ -116,6 +143,8 @@ class CodexRunner:
                 workspace=workspace,
                 stdout_path=stdout_path,
                 prompt=prompt,
+                candidate_id=run_identity.candidate_id,
+                session_id=run_identity.session_id or "",
                 on_process_start=on_process_start,
                 on_process_exit=on_process_exit,
             )
@@ -127,6 +156,11 @@ class CodexRunner:
         run_dir: str,
         stdout_path: Path,
         prompt: str,
+        run_identity: RunIdentity,
+        allow_turn_steer: bool,
+        allow_thread_resume_same_run_only: bool,
+        handoff_bundle: dict[str, Any] | None,
+        steer_message: str,
         on_process_start: Callable[[int], None] | None,
         on_process_exit: Callable[[], None] | None,
     ) -> CodexRunResult:
@@ -137,6 +171,11 @@ class CodexRunner:
                         workspace=workspace,
                         run_dir=run_dir,
                         prompt=prompt,
+                        run_identity=run_identity,
+                        allow_turn_steer=allow_turn_steer,
+                        allow_thread_resume_same_run_only=allow_thread_resume_same_run_only,
+                        handoff_bundle=handoff_bundle,
+                        steer_message=steer_message,
                         on_process_start=on_process_start,
                     )
                 )
@@ -160,6 +199,7 @@ class CodexRunner:
             summary=summary,
             changed_files=changed_files,
             payload=result.implementation_result,
+            candidate_id=run_identity.candidate_id,
         )
         (Path(stdout_path).parent / "changed_files.json").write_text(
             json.dumps({"changed_files": changed_files}, ensure_ascii=False, indent=2),
@@ -171,6 +211,7 @@ class CodexRunner:
             changed_files=changed_files,
             summary=summary,
             mode="app-server",
+            session_id=result.session_id,
         )
 
     async def _run_app_server_backend(
@@ -179,16 +220,24 @@ class CodexRunner:
         workspace: str,
         run_dir: str,
         prompt: str,
+        run_identity: RunIdentity,
+        allow_turn_steer: bool,
+        allow_thread_resume_same_run_only: bool,
+        handoff_bundle: dict[str, Any] | None,
+        steer_message: str,
         on_process_start: Callable[[int], None] | None,
     ):
         backend = self.app_server_backend_factory(self.app_server_command)
+        session_strategy = self._session_strategy(run_identity=run_identity, handoff_bundle=handoff_bundle)
         handle = await backend.start_run(
             RunSpec(
-                run_id="run",
-                issue_key="issue",
-                candidate_id="primary",
+                run_id=run_identity.attempt_id,
+                issue_key=run_identity.issue_key,
+                candidate_id=run_identity.candidate_id,
                 cwd=workspace,
                 prompt=prompt,
+                session_id=run_identity.session_id or "",
+                session_strategy=session_strategy,
                 model=self.model,
                 service_name="dev-bot",
                 output_schema_name="implementation_result_v1",
@@ -196,13 +245,41 @@ class CodexRunner:
                 writable_roots=[workspace],
                 read_only_roots=[],
                 network_access=False,
-                allow_turn_steer=False,
-                allow_thread_resume_same_run_only=True,
+                allow_turn_steer=allow_turn_steer,
+                allow_thread_resume_same_run_only=allow_thread_resume_same_run_only,
             )
         )
         if on_process_start is not None and handle.process_id is not None:
             on_process_start(handle.process_id)
+        if allow_turn_steer and steer_message.strip():
+            await backend.steer(handle, steer_message.strip())
         return await backend.collect_outputs(handle)
+
+    def _session_strategy(self, *, run_identity: RunIdentity, handoff_bundle: dict[str, Any] | None) -> str:
+        if handoff_bundle and run_identity.session_id:
+            return "compact"
+        if run_identity.session_id:
+            return "fork"
+        return "fresh"
+
+    def read_session(self, *, workspace: str, session_id: str) -> dict[str, Any] | None:
+        del workspace
+        if self._app_server_disabled() or not session_id.strip():
+            return None
+        try:
+            asyncio.get_running_loop()
+        except RuntimeError:
+            pass
+        else:
+            return None
+        try:
+            return asyncio.run(self._read_session_backend(session_id=session_id))
+        except Exception:
+            return None
+
+    async def _read_session_backend(self, *, session_id: str) -> dict[str, Any]:
+        backend = self.app_server_backend_factory(self.app_server_command)
+        return await backend.read_thread(session_id)
 
     def _run_exec_fallback(
         self,
@@ -210,6 +287,8 @@ class CodexRunner:
         workspace: str,
         stdout_path: Path,
         prompt: str,
+        candidate_id: str,
+        session_id: str,
         on_process_start: Callable[[int], None] | None,
         on_process_exit: Callable[[], None] | None,
     ) -> CodexRunResult:
@@ -252,6 +331,7 @@ class CodexRunner:
             artifacts_dir=Path(stdout_path).parent,
             summary=summary,
             changed_files=changed_files,
+            candidate_id=candidate_id,
         )
         (Path(stdout_path).parent / "changed_files.json").write_text(
             json.dumps({"changed_files": changed_files}, ensure_ascii=False, indent=2),
@@ -263,6 +343,7 @@ class CodexRunner:
             changed_files=changed_files,
             summary=summary,
             mode="exec-fallback",
+            session_id=session_id,
         )
 
     def _app_server_disabled(self) -> bool:
@@ -409,9 +490,10 @@ class CodexRunner:
         summary: str,
         changed_files: list[str],
         payload: dict[str, Any] | None = None,
+        candidate_id: str = "primary",
     ) -> None:
         data = {
-            "candidate_id": "primary",
+            "candidate_id": candidate_id,
             "summary": summary,
             "changed_files": changed_files,
             "tests_run": [],

@@ -42,6 +42,7 @@ def setup_planning_artifacts(
     plan: dict[str, Any] | None = None,
     test_plan: dict[str, Any] | None = None,
     verification_plan: dict[str, Any] | None = None,
+    candidate_decision: dict[str, Any] | None = None,
     requirement_summary: dict[str, Any] | None = None,
 ) -> None:
     """Write the minimum planning artifacts required by ``execute_run``."""
@@ -53,7 +54,14 @@ def setup_planning_artifacts(
     state_store.write_artifact(
         thread_id,
         "plan.json",
-        plan or {"steps": ["step1"]},
+        plan
+        or {
+            "version": 2,
+            "steps": ["step1"],
+            "must_not_touch": [],
+            "verification_focus": [],
+            "exploration_required": False,
+        },
     )
     state_store.write_artifact(
         thread_id,
@@ -64,4 +72,9 @@ def setup_planning_artifacts(
         thread_id,
         "verification_plan.json",
         verification_plan or {},
+    )
+    state_store.write_artifact(
+        thread_id,
+        "candidate_decision.json",
+        candidate_decision or {"enabled": False, "candidate_ids": ["primary"]},
     )

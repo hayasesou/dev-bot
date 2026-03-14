@@ -153,6 +153,23 @@ class DiscordSchedulerTests(unittest.TestCase):
         self.assertEqual(42, self.state_store.load_artifact("owner/repo#42", "issue.json")["number"])
         self.assertEqual({}, self.state_store.load_artifact("owner/repo#42", "plan.json"))
 
+    def test_persist_artifacts_writes_canonical_planning_views(self) -> None:
+        self.state_store.create_run(thread_id=1, parent_message_id=10, channel_id=20)
+
+        self.client._persist_artifacts(
+            1,
+            {
+                "plan": {"goal": "legacy"},
+                "plan_v2": {"version": 2, "goal": "canonical"},
+                "committee_bundle": {"version": 1, "mode": "committee"},
+            },
+        )
+
+        self.assertEqual("legacy", self.state_store.load_artifact(1, "plan.json")["goal"])
+        self.assertEqual("canonical", self.state_store.load_artifact(1, "plan_v2.json")["goal"])
+        self.assertEqual("canonical", self.state_store.load_planning_artifact(1, "plan_v2.json")["goal"])
+        self.assertEqual("committee", self.state_store.load_planning_artifact(1, "committee_bundle.json")["mode"])
+
 
 class _FakeThread:
     def __init__(self, thread_id: int) -> None:
