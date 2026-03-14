@@ -35,11 +35,7 @@ class WorkspaceManager:
         mirror.parent.mkdir(parents=True, exist_ok=True)
         workspace_root.mkdir(parents=True, exist_ok=True)
 
-        if not mirror.exists():
-            self._run(["git", "clone", "--mirror", self._clone_url(repo_full_name), str(mirror)])
-        else:
-            self._run(["git", "--git-dir", str(mirror), "remote", "set-url", "origin", self._clone_url(repo_full_name)])
-            self._run(["git", "--git-dir", str(mirror), "fetch", "origin", "--prune"])
+        self._ensure_mirror(repo_full_name, mirror)
 
         branch_name = f"agent/gh-{issue_number}-{issue_slug}"
         if not self._has_any_ref(git_dir=str(mirror)):
@@ -81,8 +77,7 @@ class WorkspaceManager:
                 self._run(["git", "-C", str(workspace), "checkout", "-B", branch_name, mirror_base_ref])
 
         self._run(["git", "-C", str(workspace), "remote", "set-url", "origin", self._clone_url(repo_full_name)])
-        self._run(["git", "-C", str(workspace), "config", "user.name", "dev-bot"])
-        self._run(["git", "-C", str(workspace), "config", "user.email", "dev-bot@example.local"])
+        self._configure_git_user(str(workspace))
         resolved_run_root = Path(run_root) if run_root else workspace_root / "latest-run"
         resolved_run_root.mkdir(parents=True, exist_ok=True)
         return {
@@ -117,11 +112,7 @@ class WorkspaceManager:
         mirror.parent.mkdir(parents=True, exist_ok=True)
         workspace_root.mkdir(parents=True, exist_ok=True)
 
-        if not mirror.exists():
-            self._run(["git", "clone", "--mirror", self._clone_url(repo_full_name), str(mirror)])
-        else:
-            self._run(["git", "--git-dir", str(mirror), "remote", "set-url", "origin", self._clone_url(repo_full_name)])
-            self._run(["git", "--git-dir", str(mirror), "fetch", "origin", "--prune"])
+        self._ensure_mirror(repo_full_name, mirror)
 
         branch_name = f"agent/gh-{issue_number}-{issue_slug}-{attempt_id}-{candidate_id}"
         if not self._has_any_ref(git_dir=str(mirror)):
@@ -160,8 +151,7 @@ class WorkspaceManager:
                 self._run(["git", "-C", str(workspace), "checkout", "-B", branch_name, mirror_base_ref])
 
         self._run(["git", "-C", str(workspace), "remote", "set-url", "origin", self._clone_url(repo_full_name)])
-        self._run(["git", "-C", str(workspace), "config", "user.name", "dev-bot"])
-        self._run(["git", "-C", str(workspace), "config", "user.email", "dev-bot@example.local"])
+        self._configure_git_user(str(workspace))
         return {
             "workspace_key": workspace_key,
             "workspace": str(workspace),
@@ -207,8 +197,7 @@ class WorkspaceManager:
             self._run(["git", "-C", workspace, "remote", "set-url", "origin", self._clone_url(repo_full_name)])
         else:
             self._run(["git", "-C", workspace, "remote", "add", "origin", self._clone_url(repo_full_name)])
-        self._run(["git", "-C", workspace, "config", "user.name", "dev-bot"])
-        self._run(["git", "-C", workspace, "config", "user.email", "dev-bot@example.local"])
+        self._configure_git_user(workspace)
         if not self._workspace_has_head(workspace):
             self._run(
                 ["git", "-C", workspace, "commit", "--allow-empty", "-m", self.EMPTY_REPO_BOOTSTRAP_COMMIT_MESSAGE]
@@ -386,6 +375,19 @@ class WorkspaceManager:
             return self.github_client.build_git_env()
         except RuntimeError:
             return None
+
+    def _ensure_mirror(self, repo_full_name: str, mirror: Path) -> None:
+        """Ensure git mirror exists and is up-to-date."""
+        if not mirror.exists():
+            self._run(["git", "clone", "--mirror", self._clone_url(repo_full_name), str(mirror)])
+        else:
+            self._run(["git", "--git-dir", str(mirror), "remote", "set-url", "origin", self._clone_url(repo_full_name)])
+            self._run(["git", "--git-dir", str(mirror), "fetch", "origin", "--prune"])
+
+    def _configure_git_user(self, workspace: str) -> None:
+        """Configure git user for commits in the workspace."""
+        self._run(["git", "-C", workspace, "config", "user.name", "dev-bot"])
+        self._run(["git", "-C", workspace, "config", "user.email", "dev-bot@example.local"])
 
 
 def _slugify_issue_title(title: str) -> str:

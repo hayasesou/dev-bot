@@ -399,15 +399,17 @@ class FileStateStore:
 
     def load_attempt_artifact(self, identifier: str | int, attempt_id: str, filename: str) -> object:
         path = self.attempt_artifacts_dir(identifier, attempt_id) / filename
-        if not path.exists():
+        try:
+            return json.loads(path.read_text(encoding="utf-8"))
+        except FileNotFoundError:
             return {}
-        return json.loads(path.read_text(encoding="utf-8"))
 
     def load_planning_artifact(self, identifier: str | int, filename: str) -> object:
         path = self.planning_dir(identifier) / filename
-        if not path.exists():
+        try:
+            return json.loads(path.read_text(encoding="utf-8"))
+        except FileNotFoundError:
             return {}
-        return json.loads(path.read_text(encoding="utf-8"))
 
     def load_candidate_artifact(
         self,
@@ -417,9 +419,10 @@ class FileStateStore:
         filename: str,
     ) -> object:
         path = self.candidate_artifacts_dir(identifier, attempt_id, candidate_id) / filename
-        if not path.exists():
+        try:
+            return json.loads(path.read_text(encoding="utf-8"))
+        except FileNotFoundError:
             return {}
-        return json.loads(path.read_text(encoding="utf-8"))
 
     def promote_candidate_to_views(self, identifier: str | int, attempt_id: str, candidate_id: str) -> None:
         candidate_root = self.candidate_dir(identifier, attempt_id, candidate_id)
@@ -538,9 +541,10 @@ class FileStateStore:
 
     def load_execution_artifact(self, identifier: str | int, filename: str, run_id: str | None = None) -> object:
         path = self.execution_artifacts_dir(identifier, run_id) / filename
-        if not path.exists():
+        try:
+            return json.loads(path.read_text(encoding="utf-8"))
+        except FileNotFoundError:
             return {}
-        return json.loads(path.read_text(encoding="utf-8"))
 
     def _promote_draft_artifacts(self, thread_id: int, issue_key: str) -> None:
         draft_dir = self.draft_dir(thread_id)

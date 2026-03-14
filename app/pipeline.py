@@ -861,19 +861,15 @@ class DevelopmentPipeline:
         allow_thread_resume_same_run_only = self._should_allow_thread_resume_same_run_only(workflow=workflow)
         candidate_run_dir = self.state_store.execution_run_dir(issue_key, run_id) / "candidates" / candidate_id
         candidate_run_dir.mkdir(parents=True, exist_ok=True)
+        pending_metadata = self._build_runner_metadata(
+            workspace_info=workspace_info,
+            attempt_id=attempt_id,
+            candidate_id=candidate_id,
+        )
         self.state_store.write_execution_artifact(
             issue_key,
             f"candidates/{candidate_id}/runner_metadata.json",
-            {
-                "runner": "codex",
-                "attempt_id": attempt_id,
-                "candidate_id": candidate_id,
-                "mode": "pending",
-                "session_id": "",
-                "workspace_key": workspace_info.get("workspace_key", ""),
-                "workspace": workspace_info["workspace"],
-                "branch_name": workspace_info["branch_name"],
-            },
+            pending_metadata,
             run_id,
         )
         self.state_store.write_candidate_artifact(
@@ -881,16 +877,7 @@ class DevelopmentPipeline:
             attempt_id,
             candidate_id,
             "runner_metadata.json",
-            {
-                "runner": "codex",
-                "attempt_id": attempt_id,
-                "candidate_id": candidate_id,
-                "mode": "pending",
-                "session_id": "",
-                "workspace_key": workspace_info.get("workspace_key", ""),
-                "workspace": workspace_info["workspace"],
-                "branch_name": workspace_info["branch_name"],
-            },
+            pending_metadata,
         )
 
         codex_result = await self._run_blocking(
@@ -918,16 +905,13 @@ class DevelopmentPipeline:
             on_process_exit=lambda: self.process_registry.unregister(issue_key, f"codex:{candidate_id}"),
         )
         codex_log_path = Path(codex_result.stdout_path)
-        runner_metadata = {
-            "runner": "codex",
-            "attempt_id": attempt_id,
-            "candidate_id": candidate_id,
-            "mode": codex_result.mode,
-            "session_id": codex_result.session_id,
-            "workspace_key": workspace_info.get("workspace_key", ""),
-            "workspace": workspace_info["workspace"],
-            "branch_name": workspace_info["branch_name"],
-        }
+        runner_metadata = self._build_runner_metadata(
+            workspace_info=workspace_info,
+            attempt_id=attempt_id,
+            candidate_id=candidate_id,
+            mode=codex_result.mode,
+            session_id=codex_result.session_id,
+        )
         self.state_store.write_execution_artifact(
             issue_key,
             f"candidates/{candidate_id}/runner_metadata.json",
@@ -1841,6 +1825,27 @@ class DevelopmentPipeline:
                 text=True,
             )
             shutil.rmtree(workspace.parent, ignore_errors=True)
+
+    def _build_runner_metadata(
+        self,
+        *,
+        workspace_info: dict[str, Any],
+        attempt_id: str,
+        candidate_id: str,
+        mode: str = "pending",
+        session_id: str = "",
+    ) -> dict[str, Any]:
+        """Build runner metadata dict for artifact persistence."""
+        return {
+            "runner": "codex",
+            "attempt_id": attempt_id,
+            "candidate_id": candidate_id,
+            "mode": mode,
+            "session_id": session_id,
+            "workspace_key": workspace_info.get("workspace_key", ""),
+            "workspace": workspace_info["workspace"],
+            "branch_name": workspace_info["branch_name"],
+        }
 
     def _build_candidate_manifest(
         self,
