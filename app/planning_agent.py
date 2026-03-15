@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 from collections.abc import Callable
 from dataclasses import dataclass
+from datetime import UTC, datetime
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any, TypedDict, cast
@@ -755,13 +756,14 @@ class PlanningAgent:
         progress_callback: Callable[[dict[str, Any]], None] | None = None,
         debug_recorder: Callable[[dict[str, Any]], None] | None = None,
     ) -> dict[str, Any]:
-        common_prompt = (
-            "以下の要件サマリーとリポジトリ情報を見て判断してください。\n\n"
-            f"requirement_summary:\n{json.dumps(summary, ensure_ascii=False, indent=2)}\n\n"
-            f"repo_profile:\n{json.dumps(repo_profile, ensure_ascii=False, indent=2)}\n\n"
-            f"repo_context:\n{repo_context}\n\n"
-            f"plan.json:\n{json.dumps(plan, ensure_ascii=False, indent=2)}\n"
+        seed_context = _build_test_plan_seed_context(
+            summary=summary,
+            repo_profile=repo_profile,
+            repo_context=repo_context,
+            plan=plan,
         )
+        overview_started_at_dt = datetime.now(UTC)
+        overview_started_at = _format_progress_timestamp(overview_started_at_dt)
         if progress_callback is not None:
             progress_callback(
                 {
@@ -770,12 +772,16 @@ class PlanningAgent:
                     "current": 0,
                     "total": 0,
                     "message": "test_plan overview を生成中",
+                    "started_at": overview_started_at,
+                    "last_event_at": overview_started_at,
+                    "elapsed_ms": 0,
+                    "last_event_kind": "started",
                 }
             )
         overview_result = client.json_response_with_meta(
             TEST_PLAN_SYSTEM_PROMPT,
             (
-                f"{common_prompt}\n"
+                f"{seed_context}\n\n"
                 "まず test_plan の全体方針だけを作成してください。"
                 " test_targets と strategy のみを返し、cases / regression_risks / risks はまだ出力しないでください。"
             ),
@@ -788,6 +794,16 @@ class PlanningAgent:
             prompt_kind="test_plan",
             debug_recorder=debug_recorder,
             debug_context={"phase": "overview"},
+            include_partial_messages=True,
+            event_callback=_make_test_plan_progress_event_callback(
+                progress_callback,
+                status="test_plan_generating",
+                phase="overview",
+                current=0,
+                total=0,
+                message="test_plan overview を生成中",
+                started_at=overview_started_at_dt,
+            ),
         )
         overview = overview_result.payload
         acceptance_items = [str(item).strip() for item in summary.get("acceptance_criteria", []) if str(item).strip()]
@@ -801,12 +817,18 @@ class PlanningAgent:
                     "current": 0,
                     "total": len(acceptance_items),
                     "message": "test_plan overview 完了",
+                    "started_at": overview_started_at,
+                    "last_event_at": _format_progress_timestamp(),
+                    "elapsed_ms": _elapsed_ms(overview_started_at_dt),
+                    "last_event_kind": "completed",
                     "session_id": overview_result.session_id or "",
                 }
             )
 
         case_chunks: list[dict[str, Any]] = []
         for index, acceptance in enumerate(acceptance_items, start=1):
+            chunk_started_at_dt = datetime.now(UTC)
+            chunk_started_at = _format_progress_timestamp(chunk_started_at_dt)
             if progress_callback is not None:
                 progress_callback(
                     {
@@ -816,16 +838,23 @@ class PlanningAgent:
                         "total": len(acceptance_items),
                         "acceptance_criterion": acceptance,
                         "message": f"test_plan chunk {index}/{len(acceptance_items)} を生成中",
+                        "started_at": chunk_started_at,
+                        "last_event_at": chunk_started_at,
+                        "elapsed_ms": 0,
+                        "last_event_kind": "started",
                     }
                 )
+            chunk_prompt = (
+                f"{seed_context}\n\n"
+                f"overview:\n{json.dumps(overview, ensure_ascii=False, indent=2)}\n\n"
+                f"対象の acceptance criterion ({index}/{len(acceptance_items)}): {acceptance}\n\n"
+                "この acceptance criterion に対応する cases / regression_risks / risks のみを返してください。"
+                " cases はこの acceptance criterion を必ず参照し、他の acceptance criterion のケースは混ぜないでください。"
+                " overview で確定した test_targets / strategy と矛盾しない内容にしてください。"
+            )
             partial_result = client.json_response_with_meta(
                 TEST_PLAN_SYSTEM_PROMPT,
-                (
-                    f"{common_prompt}\n"
-                    f"対象の acceptance criterion ({index}/{len(acceptance_items)}): {acceptance}\n\n"
-                    "この acceptance criterion に対応する cases / regression_risks / risks のみを返してください。"
-                    " cases はこの acceptance criterion を必ず参照し、他の acceptance criterion のケースは混ぜないでください。"
-                ),
+                chunk_prompt,
                 cwd=workspace,
                 max_turns=4,
                 allowed_tools=READ_ONLY_TOOLS,
@@ -839,6 +868,20 @@ class PlanningAgent:
                     "phase_index": index,
                     "phase_label": acceptance,
                 },
+                resume_session_id=overview_result.session_id,
+                continue_conversation=bool(overview_result.session_id),
+                fork_session=bool(overview_result.session_id),
+                include_partial_messages=True,
+                event_callback=_make_test_plan_progress_event_callback(
+                    progress_callback,
+                    status="test_plan_generating",
+                    phase="acceptance_criterion",
+                    current=index,
+                    total=len(acceptance_items),
+                    message=f"test_plan chunk {index}/{len(acceptance_items)} を生成中",
+                    started_at=chunk_started_at_dt,
+                    acceptance_criterion=acceptance,
+                ),
             )
             case_chunks.append(partial_result.payload)
             if progress_callback is not None:
@@ -850,6 +893,10 @@ class PlanningAgent:
                         "total": len(acceptance_items),
                         "acceptance_criterion": acceptance,
                         "message": f"test_plan chunk {index}/{len(acceptance_items)} 完了",
+                        "started_at": chunk_started_at,
+                        "last_event_at": _format_progress_timestamp(),
+                        "elapsed_ms": _elapsed_ms(chunk_started_at_dt),
+                        "last_event_kind": "completed",
                         "session_id": partial_result.session_id or "",
                     }
                 )
@@ -884,21 +931,21 @@ def _build_test_plan_repo_context(workspace: str, repo_profile: dict[str, Any]) 
     sections: list[str] = []
 
     readme_files = [str(item).strip() for item in repo_profile.get("readme_files", []) if str(item).strip()]
-    for relative_path in readme_files[:2]:
-        excerpt = _read_excerpt(root / relative_path, 3000)
+    for relative_path in readme_files[:1]:
+        excerpt = _read_excerpt(root / relative_path, 1800)
         if excerpt:
             sections.append(f"[file] {relative_path}\n{excerpt}")
 
     for relative_path in ("package.json", "pyproject.toml", "requirements.txt"):
-        excerpt = _read_excerpt(root / relative_path, 2000)
+        excerpt = _read_excerpt(root / relative_path, 1200)
         if excerpt:
             sections.append(f"[file] {relative_path}\n{excerpt}")
 
     files = [str(item).strip() for item in repo_profile.get("files", []) if str(item).strip()]
     if files:
-        sections.append("[file_list]\n" + "\n".join(files[:80]))
+        sections.append("[file_list]\n" + "\n".join(files[:40]))
 
-    return "\n\n".join(sections)[:8000]
+    return "\n\n".join(sections)[:4000]
 
 
 def _read_excerpt(path: Path, limit: int) -> str:
@@ -909,6 +956,119 @@ def _read_excerpt(path: Path, limit: int) -> str:
     except UnicodeDecodeError:
         text = path.read_text(encoding="utf-8", errors="replace")
     return text[:limit].strip()
+
+
+def _build_test_plan_seed_context(
+    *,
+    summary: dict[str, Any],
+    repo_profile: dict[str, Any],
+    repo_context: str,
+    plan: dict[str, Any],
+) -> str:
+    compact_payload = {
+        "requirement_summary": {
+            "goal": _truncate_text(summary.get("goal", ""), 800),
+            "in_scope": _coerce_string_list(summary.get("in_scope"), limit=12),
+            "acceptance_criteria": _coerce_string_list(summary.get("acceptance_criteria"), limit=20),
+            "constraints": _coerce_string_list(summary.get("constraints"), limit=8),
+            "test_focus": _coerce_string_list(summary.get("test_focus"), limit=8),
+            "preferred_outcomes": _coerce_string_list(summary.get("preferred_outcomes"), limit=6),
+            "disallowed_approaches": _coerce_string_list(summary.get("disallowed_approaches"), limit=6),
+            "recommended_direction": _truncate_text(summary.get("recommended_direction", ""), 500),
+        },
+        "repo_profile": {
+            "languages": _coerce_string_list(repo_profile.get("languages"), limit=6),
+            "setup_commands": _coerce_string_list(repo_profile.get("setup_commands"), limit=4),
+            "test_commands": _coerce_string_list(repo_profile.get("test_commands"), limit=4),
+            "lint_commands": _coerce_string_list(repo_profile.get("lint_commands"), limit=4),
+            "typecheck_commands": _coerce_string_list(repo_profile.get("typecheck_commands"), limit=4),
+            "format_commands": _coerce_string_list(repo_profile.get("format_commands"), limit=4),
+            "build_commands": _coerce_string_list(repo_profile.get("build_commands"), limit=4),
+            "suggested_verification_profile": _truncate_text(
+                repo_profile.get("suggested_verification_profile", ""),
+                200,
+            ),
+            "files": _coerce_string_list(repo_profile.get("files"), limit=40),
+        },
+        "repo_context_excerpt": _truncate_text(repo_context, 2400),
+        "plan": {
+            "goal": _truncate_text(plan.get("goal", ""), 400),
+            "scope": _coerce_string_list(plan.get("scope"), limit=12),
+            "candidate_files": _coerce_string_list(plan.get("candidate_files"), limit=20),
+            "must_not_touch": _coerce_string_list(plan.get("must_not_touch"), limit=12),
+            "verification_focus": _coerce_string_list(plan.get("verification_focus"), limit=12),
+            "implementation_steps": _coerce_string_list(plan.get("implementation_steps"), limit=12),
+            "verification_steps": _coerce_string_list(plan.get("verification_steps"), limit=12),
+            "risks": _coerce_string_list(plan.get("risks"), limit=8),
+            "high_risk_changes": _coerce_string_list(plan.get("high_risk_changes"), limit=8),
+        },
+    }
+    return (
+        "以下の compact planning context を前提に test_plan を作成してください。"
+        " 追加の repo 読み直しは避け、ここにある情報と既存の読取結果だけで判断してください。\n\n"
+        f"test_plan_seed:\n{json.dumps(compact_payload, ensure_ascii=False, indent=2)}"
+    )
+
+
+def _coerce_string_list(value: Any, *, limit: int) -> list[str]:
+    if not isinstance(value, list):
+        return []
+    items = [str(item).strip() for item in value if str(item).strip()]
+    return items[:limit]
+
+
+def _truncate_text(value: Any, limit: int) -> str:
+    text = str(value).strip()
+    if len(text) <= limit:
+        return text
+    return text[:limit].rstrip() + "..."
+
+
+def _format_progress_timestamp(value: datetime | None = None) -> str:
+    timestamp = value or datetime.now(UTC)
+    return timestamp.isoformat().replace("+00:00", "Z")
+
+
+def _elapsed_ms(started_at: datetime) -> int:
+    return max(0, int((datetime.now(UTC) - started_at).total_seconds() * 1000))
+
+
+def _make_test_plan_progress_event_callback(
+    progress_callback: Callable[[dict[str, Any]], None] | None,
+    *,
+    status: str,
+    phase: str,
+    current: int,
+    total: int,
+    message: str,
+    started_at: datetime,
+    acceptance_criterion: str = "",
+) -> Callable[[dict[str, Any]], None] | None:
+    if progress_callback is None:
+        return None
+
+    started_at_text = _format_progress_timestamp(started_at)
+
+    def _callback(event: dict[str, Any]) -> None:
+        payload: dict[str, Any] = {
+            "status": status,
+            "phase": phase,
+            "current": current,
+            "total": total,
+            "message": message,
+            "started_at": started_at_text,
+            "last_event_at": str(event.get("timestamp") or _format_progress_timestamp()),
+            "elapsed_ms": _elapsed_ms(started_at),
+            "last_event_kind": str(event.get("event_kind") or "").strip() or "event",
+        }
+        if acceptance_criterion:
+            payload["acceptance_criterion"] = acceptance_criterion
+        session_id = str(event.get("session_id") or "").strip()
+        if session_id:
+            payload["session_id"] = session_id
+        progress_callback(payload)
+
+    return _callback
 
 
 def _merge_test_plan_chunks(overview: dict[str, Any], chunks: list[dict[str, Any]]) -> dict[str, Any]:

@@ -494,6 +494,72 @@ class PlanningAgentCommitteeTests(unittest.TestCase):
             self.assertTrue(calls)
             self.assertTrue(all(call == ["project"] for call in calls))
 
+    def test_legacy_test_plan_reuses_overview_session_with_forked_chunks(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            agent = PlanningAgent(make_test_settings())
+            plan_client = Mock()
+            test_plan_client = Mock()
+            plan_client.json_response.return_value = {
+                "version": 2,
+                "goal": "Ship it",
+                "scope": ["Implement x"],
+                "assumptions": [],
+                "candidate_files": ["app/x.py"],
+                "must_not_touch": ["WORKFLOW.md"],
+                "verification_focus": ["keep tests green"],
+                "exploration_required": False,
+                "implementation_steps": ["Implement x"],
+                "verification_steps": ["Run tests"],
+                "risks": [],
+                "high_risk_changes": [],
+            }
+            test_plan_client.json_response_with_meta.side_effect = [
+                type(
+                    "Result",
+                    (),
+                    {
+                        "payload": {
+                            "test_targets": ["tests/test_x.py"],
+                            "strategy": {"unit": [], "integration": [], "e2e": [], "mocking": []},
+                        },
+                        "session_id": "overview-session",
+                    },
+                )(),
+                type(
+                    "Result",
+                    (),
+                    {
+                        "payload": {"cases": [], "regression_risks": [], "risks": []},
+                        "session_id": "chunk-1",
+                    },
+                )(),
+            ]
+
+            with patch("app.planning_agent.ClaudeAgentClient", side_effect=[plan_client, test_plan_client]):
+                artifacts = agent.build_artifacts(
+                    workspace=tmpdir,
+                    summary={"goal": "Ship it", "acceptance_criteria": ["ac1"]},
+                    repo_profile={"files": [f"app/file_{index}.py" for index in range(100)]},
+                )
+
+            self.assertEqual(["tests/test_x.py"], artifacts.test_plan["test_targets"])
+            self.assertEqual(2, test_plan_client.json_response_with_meta.call_count)
+            overview_call = test_plan_client.json_response_with_meta.call_args_list[0]
+            chunk_call = test_plan_client.json_response_with_meta.call_args_list[1]
+            overview_kwargs = overview_call.kwargs
+            chunk_kwargs = chunk_call.kwargs
+            overview_prompt = overview_call.args[1]
+            chunk_prompt = chunk_call.args[1]
+            self.assertTrue(overview_kwargs["include_partial_messages"])
+            self.assertIsNone(overview_kwargs.get("resume_session_id"))
+            self.assertEqual("overview-session", chunk_kwargs["resume_session_id"])
+            self.assertTrue(chunk_kwargs["continue_conversation"])
+            self.assertTrue(chunk_kwargs["fork_session"])
+            self.assertTrue(chunk_kwargs["include_partial_messages"])
+            self.assertIn("test_plan_seed", overview_prompt)
+            self.assertIn("overview:", chunk_prompt)
+            self.assertNotIn('"app/file_99.py"', chunk_prompt)
+
     def test_committee_failure_falls_back_to_legacy_when_enabled(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             Path(tmpdir, "WORKFLOW.md").write_text(
