@@ -165,6 +165,120 @@ class PlanningAgentCommitteeTests(unittest.TestCase):
             self.assertEqual("Ship it", artifacts.committee_bundle["plan_v2"]["goal"])
             self.assertEqual({"enabled": False, "candidate_ids": ["primary"]}, artifacts.candidate_decision)
 
+    def test_build_artifacts_autoselects_committee_for_large_complex_summary_without_workflow(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            agent = PlanningAgent(make_test_settings())
+            merged_plan = PlanV2(
+                goal="Ship it",
+                acceptance_criteria=[f"ac{i}" for i in range(1, 10)],
+                out_of_scope=[],
+                candidate_files=["app/x.py"],
+                tasks=[PlanTask(id="T1", summary="Implement x", files=["app/x.py"], done_when="done")],
+                design_branches=[DesignBranch(id="primary", summary="main")],
+                risks=[RiskItem(risk="regression", mitigation="tests")],
+                test_mapping=[CriterionTestMappingItem(criterion="ac1", tests=["tests/test_x.py"])],
+                verification_profile="python-basic",
+            )
+            bundle = type(
+                "Bundle",
+                (),
+                {
+                    "repo": RepoExplorerV1(candidate_files=["app/x.py"]),
+                    "risk": type(
+                        "RiskOut",
+                        (),
+                        {
+                            "risks": [RiskItem(risk="regression", mitigation="tests")],
+                            "test_mapping": [CriterionTestMappingItem(criterion="ac1", tests=["tests/test_x.py"])],
+                        },
+                    )(),
+                    "constraint": ConstraintReportV1(out_of_scope=[]),
+                    "merged": merged_plan,
+                },
+            )()
+
+            with patch.object(agent, "_create_planner_committee") as create_committee:
+                create_committee.return_value.build_plan.side_effect = lambda issue_ctx: bundle
+                with patch("app.planning_agent._run_async", side_effect=lambda value: value):
+                    artifacts = agent.build_artifacts(
+                        workspace=tmpdir,
+                        summary={
+                            "goal": "Ship it",
+                            "complexity": "complex",
+                            "acceptance_criteria": [f"ac{i}" for i in range(1, 10)],
+                            "background": "x" * 3000,
+                        },
+                        repo_profile={"files": ["app/x.py"]},
+                    )
+
+            self.assertEqual("committee", artifacts.committee_bundle["mode"])
+            create_committee.assert_called_once()
+
+    def test_build_artifacts_keeps_explicit_legacy_mode_for_large_complex_summary(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            Path(tmpdir, "WORKFLOW.md").write_text(
+                (
+                    "---\n"
+                    "planning:\n"
+                    "  provider: claude-agent-sdk\n"
+                    "  mode: legacy\n"
+                    "implementation:\n"
+                    "  backend: codex-app-server\n"
+                    "review:\n"
+                    "  provider: claude-agent-sdk\n"
+                    "---\n"
+                ),
+                encoding="utf-8",
+            )
+            agent = PlanningAgent(make_test_settings())
+            plan_client = Mock()
+            test_plan_client = Mock()
+            plan_client.json_response.return_value = {
+                "version": 2,
+                "goal": "Ship it",
+                "scope": ["Do it"],
+                "assumptions": [],
+                "candidate_files": ["app/x.py"],
+                "must_not_touch": ["WORKFLOW.md"],
+                "verification_focus": ["keep tests green"],
+                "exploration_required": False,
+                "implementation_steps": ["Do it"],
+                "verification_steps": ["Run tests"],
+                "risks": [],
+                "high_risk_changes": [],
+            }
+            test_plan_client.json_response_with_meta.side_effect = [
+                Mock(
+                    payload={
+                        "test_targets": ["tests/test_x.py"],
+                        "strategy": {"unit": [], "integration": [], "e2e": [], "mocking": []},
+                    },
+                    session_id="overview",
+                ),
+                *[
+                    Mock(payload={"cases": [], "regression_risks": [], "risks": []}, session_id=f"chunk-{index}")
+                    for index in range(1, 10)
+                ],
+            ]
+
+            with (
+                patch("app.planning_agent.ClaudeAgentClient", side_effect=[plan_client, test_plan_client]),
+                patch.object(agent, "_create_planner_committee") as create_committee,
+            ):
+                artifacts = agent.build_artifacts(
+                    workspace=tmpdir,
+                    summary={
+                        "goal": "Ship it",
+                        "complexity": "complex",
+                        "acceptance_criteria": [f"ac{i}" for i in range(1, 10)],
+                        "background": "x" * 3000,
+                    },
+                    repo_profile={"files": ["app/x.py"]},
+                )
+
+            self.assertEqual("legacy", artifacts.committee_bundle["mode"])
+            create_committee.assert_not_called()
+
     def test_build_artifacts_enables_candidate_mode_for_rework_committee_plan(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             Path(tmpdir, "WORKFLOW.md").write_text(

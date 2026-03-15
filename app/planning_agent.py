@@ -321,7 +321,12 @@ class PlanningAgent:
             workflow_definition.config.planning if workflow_definition and workflow_definition.config else None
         )
         candidate_mode_triggers = self._candidate_mode_triggers(workflow_definition)
-        if workflow_definition is not None and planning_config is not None and planning_config.mode == "committee":
+        planning_mode = self._select_planning_mode(
+            planning_config=planning_config,
+            summary=summary,
+            repo_profile=repo_profile,
+        )
+        if planning_mode == "committee":
             try:
                 return self._build_committee_artifacts(
                     workspace=workspace,
@@ -444,7 +449,12 @@ class PlanningAgent:
             acceptance_hints=[str(item) for item in summary.get("acceptance_criteria", []) if str(item).strip()],
             extra_docs=self._build_committee_extra_docs(repo_profile),
         )
-        bundle = _run_async(committee.build_plan(issue_ctx))
+        bundle_coro = committee.build_plan(issue_ctx)
+        try:
+            bundle = _run_async(bundle_coro)
+        except Exception:
+            bundle_coro.close()
+            raise
         plan = self._committee_plan_to_legacy(bundle.merged)
         test_plan = self._committee_test_plan_to_legacy(bundle.merged)
         verification_plan = build_verification_plan(workspace=workspace, repo_profile=repo_profile, plan=plan)
@@ -558,6 +568,19 @@ class PlanningAgent:
             return list(planning_config.settings_sources)
         return ["project"]
 
+    def _select_planning_mode(
+        self,
+        *,
+        planning_config: PlanningConfig | None,
+        summary: dict[str, Any],
+        repo_profile: dict[str, Any],
+    ) -> str:
+        if planning_config is not None:
+            return str(planning_config.mode or "committee").strip() or "committee"
+        if self._should_autoselect_committee(summary=summary, repo_profile=repo_profile):
+            return "committee"
+        return "legacy"
+
     def _allow_legacy_fallback(self, planning_config: PlanningConfig | None) -> bool:
         if planning_config is None:
             return True
@@ -567,6 +590,29 @@ class PlanningAgent:
         return bool(getattr(fallback, "enabled", True)) and bool(
             getattr(fallback, "use_only_on_committee_failure", True)
         )
+
+    def _should_autoselect_committee(
+        self,
+        *,
+        summary: dict[str, Any],
+        repo_profile: dict[str, Any],
+    ) -> bool:
+        acceptance_count = len(
+            [str(item).strip() for item in summary.get("acceptance_criteria", []) if str(item).strip()]
+        )
+        complexity = str(summary.get("complexity", "")).strip().lower()
+        summary_chars = len(json.dumps(summary, ensure_ascii=False))
+        repo_files = len([str(item).strip() for item in repo_profile.get("files", []) if str(item).strip()])
+
+        if acceptance_count >= 12:
+            return True
+        if complexity == "complex" and acceptance_count >= 8:
+            return True
+        if complexity == "complex" and summary_chars >= 2800:
+            return True
+        if repo_files >= 120 and acceptance_count >= 6:
+            return True
+        return False
 
     def _candidate_mode_triggers(self, workflow_definition: Any) -> CandidateModeTriggers | None:
         if workflow_definition is None or getattr(workflow_definition, "config", None) is None:
