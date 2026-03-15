@@ -1074,7 +1074,7 @@ class PlanningAgentCommitteeTests(unittest.TestCase):
                     agent,
                     "_build_test_plan_chunk",
                     side_effect=lambda **kwargs: _build_chunk(**kwargs),
-                ) as build_chunk,
+                ),
             ):
                 artifacts = agent.build_artifacts(
                     workspace=tmpdir,

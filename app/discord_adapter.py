@@ -1494,9 +1494,8 @@ class DevBotClient(DiscordClientBase):
                 return False
             payload_phase = str(payload.get("phase", "")).strip()
             current_phase = str(current_state.get("phase", "")).strip()
-            if (
-                payload_phase == "acceptance_criterion_fallback"
-                and phase_rank.get(payload_phase, 0) > phase_rank.get(current_phase, 0)
+            if payload_phase == "acceptance_criterion_fallback" and phase_rank.get(payload_phase, 0) > phase_rank.get(
+                current_phase, 0
             ):
                 return True
             return progress_order(payload) >= progress_order(current_state)

@@ -5,13 +5,15 @@
   "human_check_recommended": false,
   "unit": "pass",
   "integration": "not_run",
-  "lint": "not_run",
+  "lint": "pass",
   "typecheck": "not_run",
   "manual_checks": [],
   "notes": [
+    "PASS: uv run ruff check app/repo_profiler.py app/planning_agent.py app/discord_adapter.py tests/test_verification_profiles.py tests/test_planning_agent.py tests/test_discord_scheduler.py",
+    "PASS: uv run ruff format --check app/repo_profiler.py app/planning_agent.py app/discord_adapter.py tests/test_verification_profiles.py tests/test_planning_agent.py tests/test_discord_scheduler.py",
     "PASS: uv run python -m pytest tests/test_verification_profiles.py tests/test_discord_scheduler.py -q",
     "PASS: uv run python -m pytest tests/test_planning_agent.py -q -k 'full_repo_file_count_threshold or legacy_test_plan_parallel_failure_falls_back_to_sequential'",
     "Stabilized tests/test_planning_agent.py::PlanningAgentCommitteeTests::test_legacy_test_plan_parallel_failure_falls_back_to_sequential by asserting fallback semantics instead of scheduler-dependent call counts.",
-    "Did not run lint, typecheck, integration tests, or the full repository test suite for this targeted fix."
+    "Did not run typecheck, integration tests, or the full repository test suite for this targeted fix."
   ]
 }
