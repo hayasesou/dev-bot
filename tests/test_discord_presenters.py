@@ -23,7 +23,15 @@ class DiscordPresenterTests(unittest.TestCase):
             verification={"status": "success"},
             review={"decision": "approve"},
             pending_approval={"status": "pending", "tool_name": "Bash", "input_text": "terraform apply"},
-            planning_progress={"phase": "plan", "current": 1, "total": 3},
+            planning_progress={
+                "phase": "plan",
+                "current": 1,
+                "total": 3,
+                "acceptance_criterion": "AC-1",
+                "last_event_kind": "AssistantMessage",
+                "elapsed_ms": 1250,
+                "last_event_at": "2026-03-16T00:00:05Z",
+            },
             current_activity={
                 "phase": "workspace",
                 "summary": "workspace ready",
@@ -38,6 +46,9 @@ class DiscordPresenterTests(unittest.TestCase):
         self.assertIn("repo: `owner/repo`", message)
         self.assertIn("issue: [#10](https://example.test/issues/10)", message)
         self.assertIn("pending_approval: `Bash` - terraform apply", message)
+        self.assertIn("planning_acceptance: AC-1", message)
+        self.assertIn("planning_heartbeat: `AssistantMessage 1.2s`", message)
+        self.assertIn("planning_updated_at: `2026-03-16T00:00:05Z`", message)
         self.assertIn("process: pid=`123` pgid=`456`", message)
 
     def test_format_why_failed_message_includes_failure_context(self) -> None:
@@ -52,6 +63,9 @@ class DiscordPresenterTests(unittest.TestCase):
                         "current": 1,
                         "total": 2,
                         "acceptance_criterion": "AC-1",
+                        "last_event_kind": "ResultMessage",
+                        "elapsed_ms": 65000,
+                        "last_event_at": "2026-03-16T00:00:10Z",
                         "last_session_id": "sess_123",
                     },
                 },
@@ -64,6 +78,8 @@ class DiscordPresenterTests(unittest.TestCase):
         self.assertIn("- stage: `plan_generation`", message)
         self.assertIn("- repo: `owner/repo`", message)
         self.assertIn("- planning_session: `sess_123`", message)
+        self.assertIn("- planning_heartbeat: `ResultMessage 1m05s`", message)
+        self.assertIn("- planning_updated_at: `2026-03-16T00:00:10Z`", message)
         self.assertIn("- failure_type: `test_failure`", message)
         self.assertIn("- final_failure_type: `test_failure`", message)
 
